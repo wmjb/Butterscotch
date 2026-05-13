@@ -524,6 +524,91 @@ elseif(PLATFORM STREQUAL "ps3")
     find_package(SDL2 REQUIRED)
     target_include_directories(butterscotch PRIVATE ${SDL2_INCLUDE_DIRS})
     target_link_libraries(butterscotch PRIVATE ${SDL2_LIBRARIES} m gcm_sys rsx sysutil io audio rt lv2 io audio bz2)
+
+elseif(PLATFORM STREQUAL "d3d9")
+    # D3D9 renderer backend in src/d3d9/
+    # src/${PLATFORM}/*.c is already picked up by PLATFORM_SOURCES:
+    #   file(GLOB PLATFORM_SOURCES src/${PLATFORM}/*.c)
+    # so we only need platform-specific defines / libs here.
+    file(GLOB D3D9_SOURCES src/image/*.c)    
+
+target_sources(butterscotch PRIVATE ${D3D9_SOURCES})
+
+    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/image)
+    # Disable GL renderers in the shared code and mark platform
+    add_compile_definitions(
+        PLATFORM_D3D9
+        DISABLE_GL_RENDERERS
+    )
+
+    # D3D9 headers live in the Windows SDK; no extra include dirs needed
+    # Link against D3D9 and (optionally) D3DCompiler if you use HLSL at runtime
+    if(MSVC OR MINGW)
+        target_link_libraries(butterscotch
+            d3d9
+            d3dcompiler
+        )
+    endif()
+
+    # Butterscotch VM/interpreter profiler
+    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" ON)
+    if(ENABLE_VM_GML_PROFILER)
+        add_compile_definitions(ENABLE_VM_GML_PROFILER)
+    endif()
+
+    # Butterscotch VM/interpreter tracing
+    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" ON)
+    if(ENABLE_VM_TRACING)
+        add_compile_definitions(ENABLE_VM_TRACING)
+    endif()
+
+    # Butterscotch VM opcode count profiler
+    option(ENABLE_VM_OPCODE_PROFILER "Enable Butterscotch VM opcode count profiler" ON)
+    if(ENABLE_VM_OPCODE_PROFILER)
+        add_compile_definitions(ENABLE_VM_OPCODE_PROFILER)
+    endif()
+
+    # Spatial grid logs
+    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" OFF)
+    if(ENABLE_SPATIAL_GRID_LOGS)
+        add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
+    endif()
+
+    # VM unknown/stubbed function logs
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" ON)
+    if(ENABLE_VM_STUB_LOGS)
+        add_compile_definitions(ENABLE_VM_STUB_LOGS)
+    endif()
+
+        target_compile_definitions(butterscotch PRIVATE _WIN32_WINNT=0x0601 NTDDI_VERSION=0x06010000 WIN32_LEAN_AND_MEAN)
+        target_link_libraries(butterscotch ${AUDIO_LIBRARIES} d3d9 m gdi32 winmm bz2)
+        target_link_options(butterscotch PRIVATE -static)
+
+    # stb_image
+    target_include_directories(butterscotch PUBLIC vendor/stb/image)
+
+    # stb_vorbis
+    target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
+
+    # Enable AddressSanitizer by default in Debug builds
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(ENABLE_ASAN_DEFAULT ON)
+    else()
+        set(ENABLE_ASAN_DEFAULT OFF)
+    endif()
+    set(ENABLE_ASAN ${ENABLE_ASAN_DEFAULT} CACHE BOOL "Enable AddressSanitizer")
+    if(ENABLE_ASAN AND NOT MINGW AND NOT CMAKE_SYSTEM_NAME STREQUAL "Haiku")
+        target_compile_options(butterscotch PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(butterscotch PRIVATE -fsanitize=address)
+    endif()
+
+    #gamecontrollerdb
+    add_custom_command(TARGET butterscotch POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_SOURCE_DIR}/vendor/gamecontrollerdb.txt
+            $<TARGET_FILE_DIR:butterscotch>/gamecontrollerdb.txt
+    )
+
 else()
     message(FATAL_ERROR "Unknown platform! ${PLATFORM}")
 endif()
