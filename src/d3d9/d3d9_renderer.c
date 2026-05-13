@@ -123,13 +123,35 @@ static bool d3d9_ensureTextureLoaded(D3D9Renderer* dr, uint32_t pageId) {
     }
 
     D3DLOCKED_RECT lr;
-    if (SUCCEEDED(IDirect3DTexture9_LockRect(tex, 0, &lr, NULL, 0))) {
-        uint8_t* dst = (uint8_t*)lr.pBits;
-        for (int y = 0; y < h; ++y) {
-            memcpy(dst + y * lr.Pitch, pixels + y * w * 4, (size_t)w * 4);
+
+if (SUCCEEDED(IDirect3DTexture9_LockRect(tex, 0, &lr, NULL, 0))) {
+    uint8_t* dst = (uint8_t*)lr.pBits;
+    uint8_t* src = pixels;
+
+    for (int y = 0; y < h; ++y) {
+        uint8_t* d = dst + y * lr.Pitch;
+        uint8_t* s = src + y * w * 4;
+
+        for (int x = 0; x < w; ++x) {
+            uint8_t r = s[0];
+            uint8_t g = s[1];
+            uint8_t b = s[2];
+            uint8_t a = s[3];
+
+            // D3DFMT_A8R8G8B8 expects BGRA in memory
+            d[0] = b;
+            d[1] = g;
+            d[2] = r;
+            d[3] = a;
+
+            s += 4;
+            d += 4;
         }
-        IDirect3DTexture9_UnlockRect(tex, 0);
     }
+
+    IDirect3DTexture9_UnlockRect(tex, 0);
+}
+
 
     free(pixels);
     dr->d3dTextures[pageId] = tex;
@@ -361,7 +383,7 @@ IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLOROP,   D3DTOP_MO
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
 
-// Alpha = texture alpha × vertex alpha 
+// Alpha = texture alpha × vertex alpha
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAOP,   D3DTOP_MODULATE);
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
