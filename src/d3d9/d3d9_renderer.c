@@ -356,14 +356,16 @@ IDirect3DDevice9_SetRenderState(dr->device, D3DRS_CULLMODE, D3DCULL_NONE);
 IDirect3DDevice9_SetRenderState(dr->device, D3DRS_FOGENABLE, FALSE);
 IDirect3DDevice9_SetRenderState(dr->device, D3DRS_COLORVERTEX, FALSE);
 
-// Texture stage 0: use texture RGB directly
-IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLOROP,   D3DTOP_SELECTARG1);
+// Texture stage 0: texture * vertex color
+IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLOROP,   D3DTOP_MODULATE);
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
 
-// Alpha = texture alpha × vertex alpha
+// Alpha = texture alpha × vertex alpha 
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAOP,   D3DTOP_MODULATE);
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
 IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+
 
 // Sampler state
 IDirect3DDevice9_SetSamplerState(dr->device, 0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
@@ -438,6 +440,9 @@ dr->bbHeight = (int)bbDesc.Height;
 
     // Begin the scene
     IDirect3DDevice9_BeginScene(dr->device);
+
+
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ALPHATESTENABLE, FALSE);
 
     // Clear color buffer (draw_clear is separate; this is just frame start)
     IDirect3DDevice9_Clear(dr->device, 0, NULL, D3DCLEAR_TARGET, 0x00000000, 1.0f, 0);
