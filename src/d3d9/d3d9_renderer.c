@@ -178,7 +178,6 @@ static bool d3d9_resolveSpriteTexture(D3D9Renderer* dr, int32_t tpagIndex,
     return true;
 }
 
-// Emits a single textured quad into the batch (same contract as GL emitTexturedQuad)
 static void d3d9_emitTexturedQuad(
     D3D9Renderer* dr,
     IDirect3DTexture9* tex,
@@ -190,33 +189,37 @@ static void d3d9_emitTexturedQuad(
     float u1, float v1,
     float r, float g, float b, float alpha
 ) {
-//printf("quad: x0=%f y0=%f x1=%f y1=%f\n", x0, y0, x1, y1);
-
-
     if (dr->quadCount > 0 && dr->currentTexture != tex) d3d9_flushBatch(dr);
     if (dr->quadCount >= MAX_QUADS) d3d9_flushBatch(dr);
     dr->currentTexture = tex;
 
     float* verts = dr->vertexData + dr->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
 
-    // Vertex 0: top-left
-    verts[0] = x0; verts[1] = y0; verts[2] = u0; verts[3] = v0;
+    float tx, ty;
+
+    // Vertex 0
+    Matrix4f_transformPoint(&dr->viewMatrix, x0, y0, &tx, &ty);
+    verts[0] = tx; verts[1] = ty; verts[2] = u0; verts[3] = v0;
     verts[4] = r;  verts[5] = g;  verts[6] = b;  verts[7] = alpha;
 
-    // Vertex 1: top-right
-    verts[8]  = x1; verts[9]  = y1; verts[10] = u1; verts[11] = v0;
+    // Vertex 1
+    Matrix4f_transformPoint(&dr->viewMatrix, x1, y1, &tx, &ty);
+    verts[8]  = tx; verts[9]  = ty; verts[10] = u1; verts[11] = v0;
     verts[12] = r;  verts[13] = g;  verts[14] = b;  verts[15] = alpha;
 
-    // Vertex 2: bottom-right
-    verts[16] = x2; verts[17] = y2; verts[18] = u1; verts[19] = v1;
+    // Vertex 2
+    Matrix4f_transformPoint(&dr->viewMatrix, x2, y2, &tx, &ty);
+    verts[16] = tx; verts[17] = ty; verts[18] = u1; verts[19] = v1;
     verts[20] = r;  verts[21] = g;  verts[22] = b;  verts[23] = alpha;
 
-    // Vertex 3: bottom-left
-    verts[24] = x3; verts[25] = y3; verts[26] = u0; verts[27] = v1;
+    // Vertex 3
+    Matrix4f_transformPoint(&dr->viewMatrix, x3, y3, &tx, &ty);
+    verts[24] = tx; verts[25] = ty; verts[26] = u0; verts[27] = v1;
     verts[28] = r;  verts[29] = g;  verts[30] = b;  verts[31] = alpha;
 
     dr->quadCount++;
 }
+
 
 typedef struct {
     Font* font;
@@ -412,18 +415,17 @@ static void d3d9_beginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, in
     dr->gameW = gameW;
     dr->gameH = gameH;
 
-// Re-acquire backbuffer every frame (device may have been reset)
-if (dr->defaultColorRT) {
-    IDirect3DSurface9_Release(dr->defaultColorRT);
-    dr->defaultColorRT = NULL;
-}
-IDirect3DDevice9_GetRenderTarget(dr->device, 0, &dr->defaultColorRT);
+    // Re-acquire backbuffer every frame (device may have been reset)
+    if (dr->defaultColorRT) {
+        IDirect3DSurface9_Release(dr->defaultColorRT);
+        dr->defaultColorRT = NULL;
+    }
+    IDirect3DDevice9_GetRenderTarget(dr->device, 0, &dr->defaultColorRT);
 
-D3DSURFACE_DESC bbDesc;
-IDirect3DSurface9_GetDesc(dr->defaultColorRT, &bbDesc);
-dr->bbWidth  = (int)bbDesc.Width;
-dr->bbHeight = (int)bbDesc.Height;
-
+    D3DSURFACE_DESC bbDesc;
+    IDirect3DSurface9_GetDesc(dr->defaultColorRT, &bbDesc);
+    dr->bbWidth  = (int)bbDesc.Width;
+    dr->bbHeight = (int)bbDesc.Height;
 
     // Resize RT if needed
     if (gameW != dr->rtWidth || gameH != dr->rtHeight) {
@@ -447,9 +449,22 @@ dr->bbHeight = (int)bbDesc.Height;
         fprintf(stderr, "D3D9: RT resized to %dx%d\n", gameW, gameH);
     }
 
-    // Bind RT and clear
+    // Bind RT
     if (dr->rtSurface) {
         IDirect3DDevice9_SetRenderTarget(dr->device, 0, dr->rtSurface);
+
+        // FIX: Reset viewport + scissor so GUI state never leaks into the RT
+        D3DVIEWPORT9 vp = {
+            0, 0,
+            (DWORD)dr->rtWidth,
+            (DWORD)dr->rtHeight,
+            0.0f, 1.0f
+        };
+        IDirect3DDevice9_SetViewport(dr->device, &vp);
+
+        RECT sc = {0, 0, dr->rtWidth, dr->rtHeight};
+        IDirect3DDevice9_SetScissorRect(dr->device, &sc);
+        IDirect3DDevice9_SetRenderState(dr->device, D3DRS_SCISSORTESTENABLE, FALSE);
     }
 
     renderer->CPortX = 0;
@@ -457,121 +472,115 @@ dr->bbHeight = (int)bbDesc.Height;
     renderer->CPortW = gameW;
     renderer->CPortH = gameH;
 
-    D3DVIEWPORT9 vp = {0, 0, (DWORD)gameW, (DWORD)gameH, 0.0f, 1.0f};
-    IDirect3DDevice9_SetViewport(dr->device, &vp);
-
     // Begin the scene
     IDirect3DDevice9_BeginScene(dr->device);
-
 
     IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ALPHATESTENABLE, FALSE);
 
     // Clear color buffer (draw_clear is separate; this is just frame start)
     IDirect3DDevice9_Clear(dr->device, 0, NULL, D3DCLEAR_TARGET, 0x00000000, 1.0f, 0);
-
 }
+
 
 static void d3d9_endFrame(Renderer* renderer) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     d3d9_flushBatch(dr);
 
-    // End scene before blitting / presenting
- //   IDirect3DDevice9_EndScene(dr->device);
-
-    // Blit RT to backbuffer with aspect‑correct letterboxing, mirroring glEndFrame
     if (!dr->rtTexture || !dr->defaultColorRT) return;
 
-    int effectiveEndX, effectiveEndY;
-    int effectiveStartX, effectiveStartY;
+    // Use the ACTUAL renderable size, not the OS window size
+    int winW = dr->bbWidth;
+    int winH = dr->bbHeight;
 
-    if ((dr->gameW * dr->windowH) / dr->gameH < dr->windowW) {
-        effectiveEndX = (dr->gameW * dr->windowH) / dr->gameH;
-        effectiveEndY = dr->windowH;
-    } else {
-        effectiveEndX = dr->windowW;
-        effectiveEndY = (dr->gameH * dr->windowW) / dr->gameW;
-    }
-    effectiveStartX = (dr->windowW - effectiveEndX) / 2;
-    effectiveStartY = (dr->windowH - effectiveEndY) / 2;
-    effectiveEndX += effectiveStartX;
-    effectiveEndY += effectiveStartY;
+    // Compute scale based on backbuffer size
+    float scaleX = (float)winW / (float)dr->gameW;
+    float scaleY = (float)winH / (float)dr->gameH;
+    float scale  = (scaleX < scaleY) ? scaleX : scaleY;
 
-// Restore viewport to full window before blitting to backbuffer
-D3DVIEWPORT9 fullVp = {
-    0, 0,
-    (DWORD)dr->bbWidth,
-    (DWORD)dr->bbHeight,
-    0.0f, 1.0f
-};
+    int scaledW = (int)(dr->gameW * scale);
+    int scaledH = (int)(dr->gameH * scale);
 
-IDirect3DDevice9_SetViewport(dr->device, &fullVp);
+    int left   = (winW - scaledW) / 2;
+    int top    = (winH - scaledH) / 2;
+    int right  = left + scaledW;
+    int bottom = top + scaledH;
 
+    // Restore viewport
+    D3DVIEWPORT9 fullVp = {
+        0, 0,
+        (DWORD)winW,
+        (DWORD)winH,
+        0.0f, 1.0f
+    };
+    IDirect3DDevice9_SetViewport(dr->device, &fullVp);
 
+    // Identity projection for blit
+    Matrix4f proj;
+    Matrix4f_identity(&proj);
+    IDirect3DDevice9_SetVertexShaderConstantF(dr->device, 0, (float*)&proj, 4);
 
-    IDirect3DDevice9_SetRenderTarget(dr->device, 0, dr->defaultColorRT);
+    // Blit RT → backbuffer
+
 
     RECT src = {0, 0, dr->rtWidth, dr->rtHeight};
-    RECT dst = {effectiveStartX, effectiveStartY, effectiveEndX, effectiveEndY};
+    RECT dst = {left, top, right, bottom};
 
     IDirect3DSurface9* rtSurf = dr->rtSurface;
     IDirect3DSurface9* bbSurf = dr->defaultColorRT;
 
-// Clamp destination rect to backbuffer bounds
-if (dst.left   < 0)          dst.left   = 0;
-if (dst.top    < 0)          dst.top    = 0;
-if (dst.right  > dr->bbWidth)  dst.right  = dr->bbWidth;
-if (dst.bottom > dr->bbHeight) dst.bottom = dr->bbHeight;
+    HRESULT hr = IDirect3DDevice9_StretchRect(
+        dr->device, rtSurf, &src, bbSurf, &dst, D3DTEXF_POINT
+    );
 
-
-
-   HRESULT hr =  IDirect3DDevice9_StretchRect(dr->device, rtSurf, &src, bbSurf, &dst, D3DTEXF_POINT);
-
-if (FAILED(hr)) {
-    fprintf(stderr, "D3D9: StretchRect failed: 0x%08X\n", hr);
+    if (FAILED(hr)) {
+        fprintf(stderr, "D3D9: StretchRect failed: 0x%08X\n", hr);
+    }
 }
-
-
-}
-
 static void d3d9_beginView(Renderer* renderer,
                            int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH,
                            int32_t portX, int32_t portY, int32_t portW, int32_t portH,
-                           float viewAngle) {
+                           float viewAngle)
+{
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
 
     dr->quadCount = 0;
     dr->currentTexture = NULL;
 
-    int32_t d3dPortY = dr->gameH - portY - portH;
-
-    D3DVIEWPORT9 vp = { (DWORD)portX, (DWORD)d3dPortY, (DWORD)portW, (DWORD)portH, 0.0f, 1.0f };
+    // Full window viewport
+    D3DVIEWPORT9 vp = {
+        (DWORD)portX,
+        (DWORD)portY,
+        (DWORD)portW,
+        (DWORD)portH,
+        0.0f, 1.0f
+    };
     IDirect3DDevice9_SetViewport(dr->device, &vp);
 
-    renderer->CPortX = portX;
-    renderer->CPortY = d3dPortY;
-    renderer->CPortW = portW;
-    renderer->CPortH = portH;
+    // Build world screen matrix
+    Matrix4f cam;
+    Matrix4f_identity(&cam);
 
-    // Projection matrix (Y‑down)
-    Matrix4f projection;
-    Matrix4f_identity(&projection);
-    Matrix4f_ortho(&projection, (float)viewX, (float)(viewX + viewW), (float)(viewY + viewH), (float)viewY, -1.0f, 1.0f);
+    // Scale world to viewport 
+    float sx = (float)portW / (float)viewW;
+    float sy = (float)portH / (float)viewH;
+    Matrix4f_scale(&cam, sx, sy, 1.0f);
 
+    // Translate world by -viewX, -viewY (scrolling)
+    Matrix4f_translate(&cam, -viewX, -viewY, 0.0f);
+
+    // Optional rotation (around view center)
     if (viewAngle != 0.0f) {
-        float cx = (float)viewX + (float)viewW / 2.0f;
-        float cy = (float)viewY + (float)viewH / 2.0f;
-        Matrix4f rot;
-        Matrix4f_identity(&rot);
-        Matrix4f_translate(&rot, cx, cy, 0.0f);
-        float angleRad = viewAngle * (float)M_PI / 180.0f;
-        Matrix4f_rotateZ(&rot, -angleRad);
-        Matrix4f_translate(&rot, -cx, -cy, 0.0f);
-        Matrix4f result;
-        Matrix4f_multiply(&result, &projection, &rot);
-        projection = result;
+        float cx = viewW * 0.5f;
+        float cy = viewH * 0.5f;
+        Matrix4f_translate(&cam, cx, cy, 0.0f);
+        Matrix4f_rotateZ(&cam, -viewAngle * (float)M_PI / 180.0f);
+        Matrix4f_translate(&cam, -cx, -cy, 0.0f);
     }
 
-    renderer->PreviousViewMatrix = projection;
+    // 4. Move into viewport position
+    Matrix4f_translate(&cam, (float)portX, (float)portY, 0.0f);
+
+    dr->viewMatrix = cam;
 }
 
 static void d3d9_endView(Renderer* renderer) {
@@ -619,7 +628,21 @@ static void d3d9_beginGUI(Renderer* renderer,
     // Upload GUI projection matrix
     Matrix4f proj;
     Matrix4f_identity(&proj);
-    Matrix4f_ortho(&proj, 0.0f, (float)guiW, (float)guiH, 0.0f, -1.0f, 1.0f);
+    Matrix4f_ortho(&proj,
+                   0.0f,
+                   (float)guiW,
+                   (float)guiH,
+                   0.0f,
+                   -1.0f, 1.0f);
+
+    // D3D9 half‑texel correction
+    Matrix4f guiTexelFix;
+    Matrix4f_identity(&guiTexelFix);
+    Matrix4f_translate(&guiTexelFix, -0.5f, -0.5f, 0.0f);
+
+    Matrix4f guiFixedProj;
+    Matrix4f_multiply(&guiFixedProj, &guiTexelFix, &proj);
+    proj = guiFixedProj;
 
     IDirect3DDevice9_SetVertexShaderConstantF(dr->device, 0, (float*)&proj, 4);
 
@@ -636,6 +659,7 @@ static void d3d9_endGUI(Renderer* renderer)
     // Restore world state
     IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ALPHATESTENABLE, FALSE);
 }
+
 
 
 
