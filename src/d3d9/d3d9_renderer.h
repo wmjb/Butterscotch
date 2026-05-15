@@ -70,6 +70,8 @@ int bbHeight;
     // CPU-side vertex buffer (same layout as GL)
     float* vertexData; // MAX_QUADS * VERTICES_PER_QUAD * FLOATS_PER_VERTEX
 
+Matrix4f viewMatrix;
+
 
 } D3D9Renderer;
 
