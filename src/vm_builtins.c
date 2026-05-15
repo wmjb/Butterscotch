@@ -6295,25 +6295,16 @@ static RValue builtin_surface_set_target(VMContext* ctx, RValue* args, MAYBE_UNU
     int32_t surfaceId = (int32_t) RValue_toReal(args[0]);
 
     Runner* runner = (Runner*) ctx->runner;
-    if (runner->renderer != nullptr) {
-
-        bool exists = Renderer_surfaceSetTarget(runner->renderer, surfaceId);
-
-        if (exists == true) {
-        //fprintf(stderr, "Set Surface Target Yes\n");
+    if (Runner_surfaceSetTarget(runner, surfaceId)) {
         return RValue_makeReal(1.0);
-        }
     }
     return RValue_makeReal(0.0);
 }
 
-static RValue builtin_surface_reset_target(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+static RValue builtin_surface_reset_target(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = (Runner*) ctx->runner;
-    if (runner->renderer != nullptr) {
-        bool exists = Renderer_surfaceResetTarget(runner->renderer);
-        if (exists == true) {
-            return RValue_makeReal(1.0);
-        }
+    if (Runner_surfaceResetTarget(runner)) {
+        return RValue_makeReal(1.0);
     }
     return RValue_makeReal(0.0);
 }
@@ -6376,7 +6367,7 @@ static RValue builtin_draw_surface(VMContext* ctx, RValue* args, MAYBE_UNUSED in
     float y = (float) RValue_toReal(args[2]);
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer != nullptr) {
-        runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, x, y, 1.0, 1.0, 0.0, 0xFFFFFFFF, 1.0);
+        runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, 0, 0, -1, -1, x, y, 1.0, 1.0, 0.0, 0xFFFFFFFF, 1.0);
     }
     return RValue_makeUndefined();
 }
@@ -6395,7 +6386,7 @@ static RValue builtin_draw_surface_ext(VMContext* ctx, RValue* args, MAYBE_UNUSE
 
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer != nullptr) {
-        runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, x, y, xscale, yscale, rot, color, alpha);
+        runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, 0, 0, -1, -1, x, y, xscale, yscale, rot, color, alpha);
     }
     return RValue_makeUndefined();
 }
@@ -6414,7 +6405,7 @@ static RValue builtin_draw_surface_part(VMContext* ctx, RValue* args, MAYBE_UNUS
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer != nullptr) {
 
-        runner->renderer->vtable->drawSurfacePart(runner->renderer, surfaceId, x, y, left, top, w, h, 1.0, 1.0, 0xFFFFFFFF, 1.0);
+        runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, (int32_t) left, (int32_t) top, (int32_t) w, (int32_t) h, x, y, 1.0, 1.0, 0.0, 0xFFFFFFFF, 1.0);
     }
     return RValue_makeUndefined();
 }
@@ -6438,7 +6429,7 @@ static RValue builtin_draw_surface_part_ext(VMContext* ctx, RValue* args, MAYBE_
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer != nullptr) {
 
-        runner->renderer->vtable->drawSurfacePart(runner->renderer, surfaceId, x, y, left, top, w, h, xscale, yscale, color, alpha);
+        runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, (int32_t) left, (int32_t) top, (int32_t) w, (int32_t) h, x, y, xscale, yscale, 0.0, color, alpha);
     }
     return RValue_makeUndefined();
 }
@@ -6452,7 +6443,11 @@ static RValue builtin_draw_surface_stretched(VMContext* ctx, RValue* args, MAYBE
     float height = (float) RValue_toReal(args[4]);
     Runner* runner = (Runner*) ctx->runner;
     if (runner->renderer != nullptr) {
-        runner->renderer->vtable->drawSurfaceStretched(runner->renderer, surfaceId, x, y, width, height);
+        float surfW = Renderer_getSurfaceWidth(runner->renderer, surfaceId);
+        float surfH = Renderer_getSurfaceHeight(runner->renderer, surfaceId);
+        float xscale = surfW > 0.0f ? width  / surfW : 1.0f;
+        float yscale = surfH > 0.0f ? height / surfH : 1.0f;
+        runner->renderer->vtable->drawSurface(runner->renderer, surfaceId, 0, 0, -1, -1, x, y, xscale, yscale, 0.0, 0xFFFFFFFF, 1.0);
     }
     return RValue_makeUndefined();
 }
@@ -8255,6 +8250,11 @@ static RValue builtinThis(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSE
     return RValue_makeInt32((int32_t) inst->instanceId);
 }
 
+// @@Global@@ - GMS2 internal function returning the "global" instance's ID.
+static RValue builtinGlobal(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeInt32(INSTANCE_GLOBAL);
+}
+
 // @@Other@@ - GMS2 internal function returning the "other" instance's ID.
 // Falls back to the current instance when there is no other (matches GML semantics outside with/collision).
 static RValue builtinOther(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
@@ -9125,6 +9125,17 @@ static RValue builtinGpuSetColorWriteEnable(VMContext* ctx, RValue* args, int32_
     return RValue_makeUndefined();
 }
 
+static RValue builtinGpuGetColorWriteEnable(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    bool r, g, b, a;
+    ctx->runner->renderer->vtable->gpuGetColorWriteEnable(ctx->runner->renderer, &r, &g, &b, &a);
+    GMLArray* out = GMLArray_create(4);
+    *GMLArray_slot(out, 0) = RValue_makeReal(r ? 1.0 : 0.0);
+    *GMLArray_slot(out, 1) = RValue_makeReal(g ? 1.0 : 0.0);
+    *GMLArray_slot(out, 2) = RValue_makeReal(b ? 1.0 : 0.0);
+    *GMLArray_slot(out, 3) = RValue_makeReal(a ? 1.0 : 0.0);
+    return RValue_makeArray(out);
+}
+
 // ===[ REGISTRATION ]===
 
 void VMBuiltins_registerAll(VMContext* ctx) {
@@ -9669,6 +9680,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "@@NewGMLArray@@", builtinNewGMLArray);
     VM_registerBuiltin(ctx, "@@This@@", builtinThis);
     VM_registerBuiltin(ctx, "@@Other@@", builtinOther);
+    VM_registerBuiltin(ctx, "@@Global@@", builtinGlobal);
 #if IS_BC17_OR_HIGHER_ENABLED
     VM_registerBuiltin(ctx, "@@NullObject@@", builtinNullObject);
     VM_registerBuiltin(ctx, "@@NewGMLObject@@", builtinNewGMLObject);
@@ -9717,6 +9729,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx,"gpu_set_alphatestenable", builtinGpuSetAlphaTestEnable);
     VM_registerBuiltin(ctx,"gpu_set_alphatestref", builtinGpuSetAlphaTestRef);
     VM_registerBuiltin(ctx,"gpu_set_colorwriteenable", builtinGpuSetColorWriteEnable);
+    VM_registerBuiltin(ctx,"gpu_get_colorwriteenable", builtinGpuGetColorWriteEnable);
     VM_registerBuiltin(ctx,"gpu_set_fog", builtinGpuSetFog);
     VM_registerBuiltin(ctx,"d3d_set_fog", builtinGpuSetFog);
 }

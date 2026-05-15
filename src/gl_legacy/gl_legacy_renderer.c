@@ -6,9 +6,31 @@
 #ifdef PLATFORM_PS3
 #include "ps3gl.h"
 #include "rsxutil.h"
-GLAPI void GLAPIENTRY glActiveTexture( GLenum texture ) {};
+#include "ps3_textures.h"
+extern GLuint gPalettedProgram;
+extern GLint  gPalettedUPaletteVLoc;
+// Activate the paletted shader for a sprite draw. The caller has already bound the index texture (via glBindTexture on TEXUNIT0).
+// Sets unit 1 to the CLUT atlas and pushes uPaletteV for the TPAG's row.
+#define PS3_PALETTED_BEGIN(tpagIndex) do {                                                  \
+    float _v = PS3Textures_getTpagPaletteV(tpagIndex);                                      \
+    if (0.0f > _v) break;                                                                   \
+    glActiveTexture(GL_TEXTURE1);                                                           \
+    glBindTexture(GL_TEXTURE_2D, PS3Textures_getClutTexture());                             \
+    glEnable(GL_TEXTURE_2D);                                                                \
+    glActiveTexture(GL_TEXTURE0);                                                           \
+    glUseProgram(gPalettedProgram);                                                        \
+    if (gPalettedUPaletteVLoc >= 0) glUniform1f(gPalettedUPaletteVLoc, _v);               \
+} while (0)
+#define PS3_PALETTED_END() do {                                                             \
+    glUseProgram(0);                                                                        \
+    glActiveTexture(GL_TEXTURE1);                                                           \
+    glDisable(GL_TEXTURE_2D);                                                               \
+    glActiveTexture(GL_TEXTURE0);                                                           \
+} while (0)
 #else
 #include <glad/glad.h>
+#define PS3_PALETTED_BEGIN(tpagIndex) ((void)0)
+#define PS3_PALETTED_END()            ((void)0)
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,8 +41,13 @@ GLAPI void GLAPIENTRY glActiveTexture( GLenum texture ) {};
 #include "stb_ds.h"
 #include "utils.h"
 #include "image_decoder.h"
+#ifndef PLATFORM_PS3
+#include "gl_common.h"
+#endif
 
 // ===[ Helpers ]===
+
+#ifdef PLATFORM_PS3
 static void glApplyViewport(GLLegacyRenderer* gl, int32_t x, int32_t y, int32_t w, int32_t h) {
     int32_t effW, effH;
     if ((gl->gameW * gl->windowH) / gl->gameH < gl->windowW) {
@@ -43,6 +70,19 @@ static void glApplyViewport(GLLegacyRenderer* gl, int32_t x, int32_t y, int32_t 
     glEnable(GL_SCISSOR_TEST);
     glScissor(vpX, vpY, vpW, vpH);
 }
+#else
+static void glApplyViewport(GLLegacyRenderer* gl, int32_t x, int32_t y, int32_t w, int32_t h) {
+    int32_t glY = gl->gameH - y - h;
+    glViewport(x, glY, w, h);
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(x, glY, w, h);
+
+    gl->base.CPortX = x;
+    gl->base.CPortY = glY;
+    gl->base.CPortW = w;
+    gl->base.CPortH = h;
+}
+#endif
 
 // ===[ Vtable Implementations ]===
 
@@ -55,7 +95,12 @@ static void glInit(Renderer* renderer, DataWin* dataWin) {
     glDisable(GL_DEPTH_TEST);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
+#ifdef PLATFORM_PS3
+    // TXTR is empty on PS3; page count comes from TEXTURES.BIN.
+    gl->textureCount = PS3Textures_getPageCount();
+#else
     gl->textureCount = dataWin->txtr.count;
+#endif
     gl->glTextures = safeMalloc(gl->textureCount * sizeof(GLuint));
     gl->textureWidths = safeMalloc(gl->textureCount * sizeof(int32_t));
     gl->textureHeights = safeMalloc(gl->textureCount * sizeof(int32_t));
@@ -88,6 +133,20 @@ static void glInit(Renderer* renderer, DataWin* dataWin) {
     gl->originalTpagCount = dataWin->tpag.count;
     gl->originalSpriteCount = dataWin->sprt.count;
 
+#ifndef PLATFORM_PS3
+    // Create FBO
+    glGenFramebuffers(1, &gl->fbo);
+    gl->fboTexture = 0;
+    gl->fboWidth = 0;
+    gl->fboHeight = 0;
+
+    gl->surfaces = nullptr;
+    gl->surfaceTexture = nullptr;
+    gl->surfaceWidth = nullptr;
+    gl->surfaceHeight = nullptr;
+    gl->surfaceCount = 0;
+#endif
+
     fprintf(stderr, "GL: Renderer initialized (%u texture pages)\n", gl->textureCount);
 }
 
@@ -97,6 +156,19 @@ static void glDestroy(Renderer* renderer) {
     glDeleteTextures(1, &gl->whiteTexture);
 
     glDeleteTextures((GLsizei) gl->textureCount, gl->glTextures);
+
+#ifndef PLATFORM_PS3
+    if (gl->fboTexture != 0) glDeleteTextures(1, &gl->fboTexture);
+    if (gl->fbo != 0) glDeleteFramebuffers(1, &gl->fbo);
+    for (uint32_t i = 0; gl->surfaceCount > i; i++) {
+        if (gl->surfaceTexture[i] != 0) glDeleteTextures(1, &gl->surfaceTexture[i]);
+        if (gl->surfaces[i] != 0) glDeleteFramebuffers(1, &gl->surfaces[i]);
+    }
+    free(gl->surfaces);
+    free(gl->surfaceTexture);
+    free(gl->surfaceWidth);
+    free(gl->surfaceHeight);
+#endif
 
     free(gl->glTextures);
     free(gl->textureWidths);
@@ -111,8 +183,21 @@ static void glBeginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int32
     gl->windowH = windowH;
     gl->gameW = gameW;
     gl->gameH = gameH;
-    
+
+#ifndef PLATFORM_PS3
+    if (gameW != gl->fboWidth || gameH != gl->fboHeight) {
+        GLCommon_resizeMainFBO(&gl->fboTexture, gl->fbo, &gl->fboWidth, &gl->fboHeight, gameW, gameH);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->fbo);
+    glViewport(0, 0, gameW, gameH);
+    gl->base.CPortX = 0;
+    gl->base.CPortY = 0;
+    gl->base.CPortW = gameW;
+    gl->base.CPortH = gameH;
+#else
     glApplyViewport(gl, 0, 0, gameW, gameH);
+#endif
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
@@ -152,6 +237,8 @@ static void glBeginView(Renderer* renderer, int32_t viewX, int32_t viewY, int32_
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     glActiveTexture(GL_TEXTURE0);
+
+    renderer->PreviousViewMatrix = projection;
 }
 
 static void glEndView(MAYBE_UNUSED Renderer* renderer) {
@@ -181,24 +268,10 @@ static void glEndGUI(MAYBE_UNUSED Renderer* renderer) {
 }
 
 static void glEndFrame(Renderer* renderer) {
-    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
-
-    int effectiveEndX, effectiveEndY;
-    int effectiveStartX, effectiveStartY;
-
-    // Try and match the "intended" aspect ratio as closely 
-    // as possible while still fitting on the screen
-    if ((gl->gameW * gl->windowH) / gl->gameH < gl->windowW) {
-        effectiveEndX = (gl->gameW * gl->windowH) / gl->gameH;
-        effectiveEndY = gl->windowH;
-    } else {
-        effectiveEndX = gl->windowW;
-        effectiveEndY = (gl->gameH * gl->windowW) / gl->gameW;
-    }
-    effectiveStartX = (gl->windowW - effectiveEndX) / 2;
-    effectiveStartY = (gl->windowH - effectiveEndY) / 2;
-    effectiveEndX += effectiveStartX;
-    effectiveEndY += effectiveStartY;
+    MAYBE_UNUSED GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+#ifndef PLATFORM_PS3
+    GLCommon_letterboxBlit(gl->fbo, gl->fboWidth, gl->fboHeight, gl->gameW, gl->gameH, gl->windowW, gl->windowH);
+#endif
 }
 
 static void glRendererFlush(MAYBE_UNUSED Renderer* renderer) {}
@@ -223,10 +296,31 @@ static bool ensureTextureLoaded(GLLegacyRenderer* gl, uint32_t pageId) {
 
     gl->textureLoaded[pageId] = true;
 
+    int w, h;
+#ifdef PLATFORM_PS3
+    // We'll load the textures on demand.
+    uint8_t* pixels;
+    if (!PS3Textures_loadPage(pageId, &w, &h, &pixels)) {
+        fprintf(stderr, "GL: PS3 page %u has no pixels\n", pageId);
+        return false;
+    }
+    gl->textureWidths[pageId] = w;
+    gl->textureHeights[pageId] = h;
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, gl->glTextures[pageId]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, w, h, 0, GL_RED, GL_UNSIGNED_BYTE, pixels);
+    // Nearest is mandatory for index textures, bilinear would interpolate palette indices into nonsense colors.
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    free(pixels);
+#else
     DataWin* dw = gl->base.dataWin;
     Texture* txtr = &dw->txtr.textures[pageId];
 
-    int w, h;
     bool gm2022_5 = DataWin_isVersionAtLeast(dw, 2022, 5, 0, 0);
     uint8_t* pixels = ImageDecoder_decodeToRgba(txtr->blobData, (size_t) txtr->blobSize, gm2022_5, &w, &h);
     if (pixels == nullptr) {
@@ -236,7 +330,7 @@ static bool ensureTextureLoaded(GLLegacyRenderer* gl, uint32_t pageId) {
 
     gl->textureWidths[pageId] = w;
     gl->textureHeights[pageId] = h;
-    
+
     glBindTexture(GL_TEXTURE_2D, gl->glTextures[pageId]);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -245,6 +339,7 @@ static bool ensureTextureLoaded(GLLegacyRenderer* gl, uint32_t pageId) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     free(pixels);
+#endif
     fprintf(stderr, "GL: Loaded TXTR page %u (%dx%d)\n", pageId, w, h);
     return true;
 }
@@ -265,6 +360,7 @@ static void glDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y
     int32_t texH = gl->textureHeights[pageId];
 
     glBindTexture(GL_TEXTURE_2D, texId);
+    PS3_PALETTED_BEGIN(tpagIndex);
 
     // Compute normalized UVs from TPAG source rect
     float u0 = (float) tpag->sourceX / (float) texW;
@@ -318,6 +414,7 @@ static void glDrawSprite(Renderer* renderer, int32_t tpagIndex, float x, float y
         glTexCoord2f(u0, v1);
         glVertex2f(x3, y3);
     glEnd();
+    PS3_PALETTED_END();
 }
 
 static void glDrawTiled(Renderer* renderer, int32_t tpagIndex, float originX, float originY, float x, float y, float xscale, float yscale, bool tileX, bool tileY, float roomW, float roomH, uint32_t color, float alpha) {
@@ -379,6 +476,7 @@ static void glDrawTiled(Renderer* renderer, int32_t tpagIndex, float originX, fl
 
     // Emit the entire tile grid in a single glBegin -> glEnd
     glBindTexture(GL_TEXTURE_2D, texId);
+    PS3_PALETTED_BEGIN(tpagIndex);
     glBegin(GL_QUADS);
     glColor4f(r, g, b, alpha);
     for (float dy = startY; endY > dy; dy += tileH) {
@@ -397,6 +495,7 @@ static void glDrawTiled(Renderer* renderer, int32_t tpagIndex, float originX, fl
         }
     }
     glEnd();
+    PS3_PALETTED_END();
 }
 
 static void glDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float alpha) {
@@ -414,6 +513,7 @@ static void glDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, flo
     int32_t texW = gl->textureWidths[pageId];
     int32_t texH = gl->textureHeights[pageId];
     glBindTexture(GL_TEXTURE_2D, texId);
+    PS3_PALETTED_BEGIN(tpagIndex);
 
     float u0 = (float) tpag->sourceX / (float) texW;
     float v0 = (float) tpag->sourceY / (float) texH;
@@ -437,6 +537,7 @@ static void glDrawSpritePos(Renderer* renderer, int32_t tpagIndex, float x1, flo
         glTexCoord2f(u0, v1);
         glVertex2f(x4, y4);
     glEnd();
+    PS3_PALETTED_END();
 }
 
 static void glDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcOffX, int32_t srcOffY, int32_t srcW, int32_t srcH, float x, float y, float xscale, float yscale, float angleDeg, float pivotX, float pivotY, uint32_t color, float alpha) {
@@ -489,6 +590,7 @@ static void glDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcO
         dx = qx3 - pivotX; dy = qy3 - pivotY; cx3 = cosA * dx - sinA * dy + pivotX; cy3 = sinA * dx + cosA * dy + pivotY;
     }
 
+    PS3_PALETTED_BEGIN(tpagIndex);
     glBegin(GL_QUADS);
         glColor4f(r, g, b, alpha);
         glTexCoord2f(u0, v0); glVertex2f(cx0, cy0);
@@ -502,6 +604,7 @@ static void glDrawSpritePart(Renderer* renderer, int32_t tpagIndex, int32_t srcO
         glColor4f(r, g, b, alpha);
         glTexCoord2f(u0, v1); glVertex2f(cx3, cy3);
     glEnd();
+    PS3_PALETTED_END();
 }
 
 // Emits a single colored quad into the batch using the white pixel texture
@@ -684,6 +787,7 @@ static void glDrawTriangle(Renderer *renderer, float x1, float y1, float x2, flo
 typedef struct {
     Font* font;
     TexturePageItem* fontTpag; // single TPAG for regular fonts (nullptr for sprite fonts)
+    int32_t fontTpagIndex;     // TPAG index for regular fonts (-1 for sprite fonts)
     GLuint texId;
     int32_t texW, texH;
     Sprite* spriteFontSprite; // source sprite for sprite fonts (nullptr for regular fonts)
@@ -694,6 +798,7 @@ typedef struct {
 static bool glResolveFontState(GLLegacyRenderer* gl, DataWin* dw, Font* font, GlFontState* state) {
     state->font = font;
     state->fontTpag = nullptr;
+    state->fontTpagIndex = -1;
     state->texId = 0;
     state->texW = 0;
     state->texH = 0;
@@ -703,6 +808,7 @@ static bool glResolveFontState(GLLegacyRenderer* gl, DataWin* dw, Font* font, Gl
         int32_t fontTpagIndex = font->tpagIndex;
         if (0 > fontTpagIndex) return false;
 
+        state->fontTpagIndex = fontTpagIndex;
         state->fontTpag = &dw->tpag.items[fontTpagIndex];
         int16_t pageId = state->fontTpag->texturePageId;
         if (0 > pageId || (uint32_t) pageId >= gl->textureCount) return false;
@@ -719,7 +825,7 @@ static bool glResolveFontState(GLLegacyRenderer* gl, DataWin* dw, Font* font, Gl
 
 // Resolves UV coordinates, texture ID, and local position for a single glyph
 // Returns false if the glyph can't be drawn
-static bool glResolveGlyph(GLLegacyRenderer* gl, DataWin* dw, GlFontState* state, FontGlyph* glyph, float cursorX, float cursorY, GLuint* outTexId, float* outU0, float* outV0, float* outU1, float* outV1, float* outLocalX0, float* outLocalY0) {
+static bool glResolveGlyph(GLLegacyRenderer* gl, DataWin* dw, GlFontState* state, FontGlyph* glyph, float cursorX, float cursorY, GLuint* outTexId, int32_t* outTpagIdx, float* outU0, float* outV0, float* outU1, float* outV1, float* outLocalX0, float* outLocalY0) {
     Font* font = state->font;
     if (font->isSpriteFont && state->spriteFontSprite != nullptr) {
         Sprite* sprite = state->spriteFontSprite;
@@ -735,6 +841,7 @@ static bool glResolveGlyph(GLLegacyRenderer* gl, DataWin* dw, GlFontState* state
         if (!ensureTextureLoaded(gl, (uint32_t) pid)) return false;
 
         *outTexId = gl->glTextures[pid];
+        *outTpagIdx = tpagIdx;
         int32_t tw = gl->textureWidths[pid];
         int32_t th = gl->textureHeights[pid];
 
@@ -747,6 +854,7 @@ static bool glResolveGlyph(GLLegacyRenderer* gl, DataWin* dw, GlFontState* state
         *outLocalY0 = cursorY + (float) ((int32_t) glyphTpag->targetY - sprite->originY);
     } else {
         *outTexId = state->texId;
+        *outTpagIdx = state->fontTpagIndex;
         *outU0 = (float) (state->fontTpag->sourceX + glyph->sourceX) / (float) state->texW;
         *outV0 = (float) (state->fontTpag->sourceY + glyph->sourceY) / (float) state->texH;
         *outU1 = (float) (state->fontTpag->sourceX + glyph->sourceX + glyph->sourceWidth) / (float) state->texW;
@@ -839,9 +947,11 @@ static void glDrawText(Renderer* renderer, const char* text, float x, float y, f
                     float u0, v0, u1, v1;
                     float localX0, localY0;
                     GLuint glyphTexId;
+                    int32_t glyphTpagIdx;
 
-                    if (glResolveGlyph(gl, dw, &fontState, glyph, cursorX, cursorY, &glyphTexId, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
+                    if (glResolveGlyph(gl, dw, &fontState, glyph, cursorX, cursorY, &glyphTexId, &glyphTpagIdx, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
                         glBindTexture(GL_TEXTURE_2D, glyphTexId);
+                        PS3_PALETTED_BEGIN(glyphTpagIdx);
 
                         float localX1 = localX0 + (float) glyph->sourceWidth;
                         float localY1 = localY0 + (float) glyph->sourceHeight;
@@ -870,6 +980,7 @@ static void glDrawText(Renderer* renderer, const char* text, float x, float y, f
                             glTexCoord2f(u0, v1);
                             glVertex2f(px3, py3);
                         glEnd();
+                        PS3_PALETTED_END();
 
                         drewSuccessfully = true;
                     }
@@ -978,9 +1089,11 @@ static void glDrawTextColor(Renderer* renderer, const char* text, float x, float
                     float u0, v0, u1, v1;
                     float localX0, localY0;
                     GLuint glyphTexId;
+                    int32_t glyphTpagIdx;
 
-                    if (glResolveGlyph(gl, dw, &fontState, glyph, cursorX, cursorY, &glyphTexId, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
+                    if (glResolveGlyph(gl, dw, &fontState, glyph, cursorX, cursorY, &glyphTexId, &glyphTpagIdx, &u0, &v0, &u1, &v1, &localX0, &localY0)) {
                         glBindTexture(GL_TEXTURE_2D, glyphTexId);
+                        PS3_PALETTED_BEGIN(glyphTpagIdx);
 
                         float localX1 = localX0 + (float) glyph->sourceWidth;
                         float localY1 = localY0 + (float) glyph->sourceHeight;
@@ -1009,6 +1122,7 @@ static void glDrawTextColor(Renderer* renderer, const char* text, float x, float
                             glTexCoord2f(u0, v1);
                             glVertex2f(px3, py3);
                         glEnd();
+                        PS3_PALETTED_END();
 
                         drewSuccessfully = true;
                     }
@@ -1078,17 +1192,45 @@ static int32_t glCreateSpriteFromSurface(Renderer* renderer, int32_t surfaceID, 
 
     if (0 >= w || 0 >= h) return -1;
 
+    // Because we don't support surfaces for now, games may attempt to read from surfaces that aren't the main surface could cause the game to crash with a buffer overruns (example: the PS3 renderer)
+    // So, if we are trying to read from ANYWHERE that isn't the main surface, reject the read
+    if (surfaceID != 0)
+        return -1;
 
     uint8_t* pixels = safeMalloc((size_t) w * (size_t) h * 4);
-    if (pixels == nullptr) return -1;
+    if (pixels == nullptr)
+        return -1;
 
+#ifdef PLATFORM_PS3
+    if (0 > x || 0 > y || (uint32_t) (x + w) > display_width || (uint32_t) (y + h) > display_height) {
+        free(pixels);
+        return -1;
+    }
+    // Ensure that the draw calls were executed
+    waitFinish();
+    const uint8_t* src = (const uint8_t*) color_buffer[curr_fb];
+    size_t srcRowBytes = color_pitch;
+    size_t dstRowBytes = (size_t) w * 4;
+    repeat(h, row) {
+        const uint8_t* srcLine = src + ((size_t) (y + row)) * srcRowBytes + (size_t) (x * 4);
+        uint8_t* dstLine = pixels + (size_t) row * dstRowBytes;
+        repeat(w, px) {
+            // Swizzle from ARGB to RGBA
+            uint8_t a = srcLine[px * 4 + 0];
+            uint8_t r = srcLine[px * 4 + 1];
+            uint8_t g = srcLine[px * 4 + 2];
+            uint8_t b = srcLine[px * 4 + 3];
+            dstLine[px * 4 + 0] = r;
+            dstLine[px * 4 + 1] = g;
+            dstLine[px * 4 + 2] = b;
+            dstLine[px * 4 + 3] = a;
+        }
+    }
+    // We don't need to flip vertically because the PlayStation 3 framebuffer is already top-down
+#else
     // OpenGL Y is bottom-up, GML Y is top-down, so flip the Y coordinate
     int32_t glY = gl->gameH - y - h;
-#ifdef PLATFORM_PS3
-    memcpy(pixels, color_buffer[curr_fb ^ 1], display_height*color_pitch);
-#else
     glReadPixels(x, glY, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-#endif
 
     // Flip vertically (OpenGL reads bottom-to-top)
     size_t rowBytes = (size_t) w * 4;
@@ -1101,6 +1243,7 @@ static int32_t glCreateSpriteFromSurface(Renderer* renderer, int32_t surfaceID, 
         memcpy(bot, rowTemp, rowBytes);
     }
     free(rowTemp);
+#endif
 
     // Create a new GL texture from the captured pixels
     GLuint newTexId;
@@ -1192,95 +1335,13 @@ static void glDeleteSprite(Renderer* renderer, int32_t spriteIndex) {
     fprintf(stderr, "GL: Deleted sprite %d\n", spriteIndex);
 }
 
-static GLenum gmsBlendModeToGL(int mode) {
-    switch(mode) {    
-        case bm_zero: return GL_ZERO;
-        case bm_one: return GL_ONE;
-        case bm_src_color: return GL_SRC_COLOR;
-        case bm_inv_src_color: return GL_ONE_MINUS_SRC_COLOR;
-        case bm_src_alpha: return GL_SRC_ALPHA;
-        case bm_inv_src_alpha: return GL_ONE_MINUS_SRC_ALPHA;
-        case bm_dest_alpha: return GL_DST_ALPHA;
-        case bm_inv_dest_alpha: return GL_ONE_MINUS_DST_ALPHA;
-        case bm_dest_color: return GL_DST_COLOR;
-        case bm_inv_dest_color: return GL_ONE_MINUS_DST_COLOR;
-        case bm_src_alpha_sat: return GL_SRC_ALPHA_SATURATE;
-    }
-    return GL_ONE;
+static void glGpuSetBlendMode(MAYBE_UNUSED Renderer* renderer, int32_t mode) {
+    glBlendEquation(GLCommon_blendModeToEquation(mode));
+    glBlendFunc(GLCommon_blendModeToSFactor(mode), GLCommon_blendModeToDFactor(mode));
 }
 
-static GLenum gmsBlendModeToGLEquation(int mode) {
-    switch (mode) {
-            case bm_normal:
-                return GL_FUNC_ADD;
-            case bm_add:
-                return GL_FUNC_ADD;
-            case bm_subtract:
-                return GL_FUNC_ADD;
-            case bm_reverse_subtract:
-                return GL_FUNC_REVERSE_SUBTRACT;
-            case bm_min:
-                return GL_MIN;
-            case bm_max:
-                return GL_FUNC_ADD;
-            default:
-                return GL_FUNC_ADD;
-    }
-}
-
-static GLenum gmsBlendModeToGLSFactor(int mode) {
-    switch (mode) {
-            case bm_normal:
-                return GL_SRC_ALPHA;
-            case bm_add:
-                return GL_SRC_ALPHA;
-            case bm_subtract:
-                return GL_ZERO;
-            case bm_reverse_subtract:
-                return GL_SRC_ALPHA;
-            case bm_min:
-                return GL_ONE;
-            case bm_max:
-                return GL_SRC_ALPHA;
-            default:
-                return gmsBlendModeToGL(mode);
-    }
-}
-
-static GLenum gmsBlendModeToGLDFactor(int mode) {
-    switch (mode) {
-            case bm_normal:
-                return GL_ONE_MINUS_SRC_ALPHA;
-            case bm_add:
-                return GL_ONE;
-            case bm_subtract:
-                return GL_ONE_MINUS_SRC_COLOR;
-            case bm_reverse_subtract:
-                return GL_ONE;
-            case bm_min:
-                return GL_ONE;
-            case bm_max:
-                return GL_ONE_MINUS_SRC_COLOR;
-            default:
-                return gmsBlendModeToGL(mode);
-    }
-}
-
-static void glGpuSetBlendMode(Renderer* renderer, int32_t mode) {
-    glBlendEquation(
-        gmsBlendModeToGLEquation(mode)
-    );
-    glBlendFunc(
-        gmsBlendModeToGLSFactor(mode), 
-        gmsBlendModeToGLDFactor(mode)
-    );
-}
-
-static void glGpuSetBlendModeExt(Renderer* renderer, int32_t sfactor, int32_t dfactor) {
-    glBlendFunc(
-        gmsBlendModeToGLSFactor(sfactor), 
-        gmsBlendModeToGLDFactor(dfactor)
-    );
+static void glGpuSetBlendModeExt(MAYBE_UNUSED Renderer* renderer, int32_t sfactor, int32_t dfactor) {
+    glBlendFunc(GLCommon_blendFactorToGL(sfactor), GLCommon_blendFactorToGL(dfactor));
 }
 
 static void glGpuSetBlendEnable(Renderer* renderer, bool enable) {
@@ -1301,24 +1362,230 @@ static void glGpuSetAlphaTestRef(Renderer* renderer, uint8_t ref) {
 }
 
 static void glGpuSetColorWriteEnable(Renderer* renderer, bool red, bool green, bool blue, bool alpha) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    gl->colorWriteR = red;
+    gl->colorWriteG = green;
+    gl->colorWriteB = blue;
+    gl->colorWriteA = alpha;
     glColorMask(red, green, blue, alpha);
+}
+
+static void glGpuGetColorWriteEnable(Renderer* renderer, bool* red, bool* green, bool* blue, bool* alpha) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    *red = gl->colorWriteR;
+    *green = gl->colorWriteG;
+    *blue = gl->colorWriteB;
+    *alpha = gl->colorWriteA;
 }
 
 // ===[ Surfaces ]===
 
+#ifndef PLATFORM_PS3
+
+static int32_t glLegacyCreateSurface(Renderer* renderer, int32_t width, int32_t height) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    uint32_t surfaceIndex = GLCommon_findOrAllocateSurfaceSlot(&gl->surfaces, &gl->surfaceTexture, &gl->surfaceWidth, &gl->surfaceHeight, &gl->surfaceCount);
+
+    glGenFramebuffers(1, &gl->surfaces[surfaceIndex]);
+    glGenTextures(1, &gl->surfaceTexture[surfaceIndex]);
+    glBindTexture(GL_TEXTURE_2D, gl->surfaceTexture[surfaceIndex]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->surfaces[surfaceIndex]);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gl->surfaceTexture[surfaceIndex], 0);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        fprintf(stderr, "GL: Surface FBO incomplete (status=0x%X)\n", status);
+    }
+
+    // Rebind whatever was the current render target before this call.
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->fbo);
+
+    gl->surfaceWidth[surfaceIndex] = width;
+    gl->surfaceHeight[surfaceIndex] = height;
+
+    fprintf(stderr, "GL: Created surface %u with size (%dx%d)\n", surfaceIndex, width, height);
+    return (int32_t) surfaceIndex;
+}
+
+static bool glLegacySurfaceExists(Renderer* renderer, int32_t surfaceId) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    if (0 > surfaceId || (uint32_t) surfaceId >= gl->surfaceCount) return false;
+    return gl->surfaces[surfaceId] != 0;
+}
+
+static float glLegacyGetSurfaceWidth(Renderer* renderer, int32_t surfaceId) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    if (0 > surfaceId || (uint32_t) surfaceId >= gl->surfaceCount) return 0.0f;
+    if (gl->surfaces[surfaceId] == 0) return 0.0f;
+    return (float) gl->surfaceWidth[surfaceId];
+}
+
+static float glLegacyGetSurfaceHeight(Renderer* renderer, int32_t surfaceId) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    if (0 > surfaceId || (uint32_t) surfaceId >= gl->surfaceCount) return 0.0f;
+    if (gl->surfaces[surfaceId] == 0) return 0.0f;
+    return (float) gl->surfaceHeight[surfaceId];
+}
+
+static void glLegacySurfaceResize(Renderer* renderer, int32_t surfaceId, int32_t width, int32_t height) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    if (0 > surfaceId || (uint32_t) surfaceId >= gl->surfaceCount) return;
+    if (gl->surfaces[surfaceId] == 0) return;
+    if (gl->surfaceWidth[surfaceId] == width && gl->surfaceHeight[surfaceId] == height) return;
+
+    if (gl->surfaceTexture[surfaceId] != 0) glDeleteTextures(1, &gl->surfaceTexture[surfaceId]);
+
+    glGenTextures(1, &gl->surfaceTexture[surfaceId]);
+    glBindTexture(GL_TEXTURE_2D, gl->surfaceTexture[surfaceId]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->surfaces[surfaceId]);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gl->surfaceTexture[surfaceId], 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->fbo);
+
+    gl->surfaceWidth[surfaceId] = width;
+    gl->surfaceHeight[surfaceId] = height;
+    fprintf(stderr, "GL: Resized Surface %u to (%dx%d)\n", surfaceId, width, height);
+}
+
+static void glLegacySurfaceFree(Renderer* renderer, int32_t surfaceId) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    if (0 > surfaceId || (uint32_t) surfaceId >= gl->surfaceCount) return;
+    if (gl->surfaceTexture[surfaceId] != 0) glDeleteTextures(1, &gl->surfaceTexture[surfaceId]);
+    if (gl->surfaces[surfaceId] != 0) glDeleteFramebuffers(1, &gl->surfaces[surfaceId]);
+    gl->surfaces[surfaceId] = 0;
+    gl->surfaceTexture[surfaceId] = 0;
+    gl->surfaceWidth[surfaceId] = 0;
+    gl->surfaceHeight[surfaceId] = 0;
+    fprintf(stderr, "GL: Freed Surface %d\n", surfaceId);
+}
+
+// Binds the given surface (or APPLICATION_SURFACE_ID for the main FBO) and sets a matching ortho projection.
+static bool glLegacySetRenderTarget(Renderer* renderer, int32_t surfaceId) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+
+    if (surfaceId == APPLICATION_SURFACE_ID) {
+        glBindFramebuffer(GL_FRAMEBUFFER, gl->fbo);
+        glViewport(gl->base.CPortX, gl->base.CPortY, gl->base.CPortW, gl->base.CPortH);
+        glMatrixMode(GL_PROJECTION);
+        glLoadMatrixf(renderer->PreviousViewMatrix.m);
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+        glEnable(GL_SCISSOR_TEST);
+        return true;
+    }
+
+    if (0 > surfaceId || (uint32_t) surfaceId >= gl->surfaceCount) return false;
+    if (gl->surfaces[surfaceId] == 0) return false;
+
+    int32_t w = gl->surfaceWidth[surfaceId];
+    int32_t h = gl->surfaceHeight[surfaceId];
+
+    glBindFramebuffer(GL_FRAMEBUFFER, gl->surfaces[surfaceId]);
+    glViewport(0, 0, w, h);
+    glDisable(GL_SCISSOR_TEST);
+
+    Matrix4f projection;
+    Matrix4f_identity(&projection);
+    Matrix4f_ortho(&projection, 0.0f, (float) w, (float) h, 0.0f, -1.0f, 1.0f);
+    glMatrixMode(GL_PROJECTION);
+    glLoadMatrixf(projection.m);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    return true;
+}
+
+// Resolves a surfaceID (or APPLICATION_SURFACE_ID for the main FBO) to a GL texture and its size.
+static bool resolveSurfaceTexture(GLLegacyRenderer* gl, int32_t surfaceId, GLuint* outTexId, int32_t* outW, int32_t* outH) {
+    if (surfaceId == APPLICATION_SURFACE_ID) {
+        *outTexId = gl->fboTexture;
+        *outW = gl->fboWidth;
+        *outH = gl->fboHeight;
+        return *outTexId != 0;
+    }
+    if (0 > surfaceId || (uint32_t) surfaceId >= gl->surfaceCount) return false;
+    if (gl->surfaces[surfaceId] == 0) return false;
+    *outTexId = gl->surfaceTexture[surfaceId];
+    *outW = gl->surfaceWidth[surfaceId];
+    *outH = gl->surfaceHeight[surfaceId];
+    return true;
+}
+
+// Surface textures are stored with Y=0 at the bottom (OpenGL convention), but GML treats
+// surfaces top-down, so we sample with V flipped (v0=1, v1=0) when drawing them.
+static void glLegacyDrawSurface(Renderer* renderer, int32_t surfaceId, int32_t srcLeft, int32_t srcTop, int32_t srcWidth, int32_t srcHeight, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color, float alpha) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    GLuint texId;
+    int32_t texW, texH;
+    if (!resolveSurfaceTexture(gl, surfaceId, &texId, &texW, &texH)) return;
+
+    if (0 > srcWidth) { srcLeft = 0; srcTop = 0; srcWidth = texW; srcHeight = texH; }
+
+    // top-down GML coords -> flipped V for our bottom-up texture
+    float u0 = (float) srcLeft / (float) texW;
+    float u1 = (float) (srcLeft + srcWidth) / (float) texW;
+    float v0 = 1.0f - (float) srcTop / (float) texH;
+    float v1 = 1.0f - (float) (srcTop + srcHeight) / (float) texH;
+
+    float r = (float) BGR_R(color) / 255.0f;
+    float g = (float) BGR_G(color) / 255.0f;
+    float b = (float) BGR_B(color) / 255.0f;
+
+    float angleRad = -angleDeg * ((float) M_PI / 180.0f);
+    Matrix4f transform;
+    Matrix4f_setTransform2D(&transform, x, y, xscale, yscale, angleRad);
+
+    float x0, y0, x1, y1, x2, y2, x3, y3;
+    Matrix4f_transformPoint(&transform, 0.0f,             0.0f,             &x0, &y0);
+    Matrix4f_transformPoint(&transform, (float) srcWidth, 0.0f,             &x1, &y1);
+    Matrix4f_transformPoint(&transform, (float) srcWidth, (float) srcHeight, &x2, &y2);
+    Matrix4f_transformPoint(&transform, 0.0f,             (float) srcHeight, &x3, &y3);
+
+    glBindTexture(GL_TEXTURE_2D, texId);
+    glBegin(GL_QUADS);
+        glColor4f(r, g, b, alpha); glTexCoord2f(u0, v0); glVertex2f(x0, y0);
+        glColor4f(r, g, b, alpha); glTexCoord2f(u1, v0); glVertex2f(x1, y1);
+        glColor4f(r, g, b, alpha); glTexCoord2f(u1, v1); glVertex2f(x2, y2);
+        glColor4f(r, g, b, alpha); glTexCoord2f(u0, v1); glVertex2f(x3, y3);
+    glEnd();
+}
+
+static void glLegacySurfaceCopy(Renderer* renderer, int32_t destSurfaceID, int32_t destX, int32_t destY, int32_t srcSurfaceID, int32_t srcX, int32_t srcY, int32_t srcW, int32_t srcH, bool part) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    GLCommon_surfaceBlit(gl->fbo, gl->fboWidth, gl->fboHeight, gl->surfaces, gl->surfaceWidth, gl->surfaceHeight, gl->surfaceCount, destSurfaceID, destX, destY, srcSurfaceID, srcX, srcY, srcW, srcH, part);
+}
+
+static bool glLegacySurfaceGetPixels(Renderer* renderer, int32_t surfaceId, uint8_t* outRGBA) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    return GLCommon_surfaceGetPixels(gl->surfaces, gl->surfaceWidth, gl->surfaceHeight, gl->surfaceCount, surfaceId, outRGBA);
+}
+
+#else
+
+// TODO: Add support for surfaces in ps3gl!
+
 static int32_t glLegacyCreateSurface(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t width, MAYBE_UNUSED int32_t height) { return -1; }
 static bool glLegacySurfaceExists(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID) { return false; }
-static bool glLegacySetSurfaceTarget(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID) { return false; }
-static bool glLegacyResetSurfaceTarget(MAYBE_UNUSED Renderer* renderer) { return false; }
+static bool glLegacySetRenderTarget(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID) { return false; }
 static float glLegacyGetSurfaceWidth(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID) { return 0.0f; }
 static float glLegacyGetSurfaceHeight(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID) { return 0.0f; }
-static void glLegacyDrawSurface(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID, MAYBE_UNUSED float x, MAYBE_UNUSED float y, MAYBE_UNUSED float xscale, MAYBE_UNUSED float yscale, MAYBE_UNUSED float angleDeg, MAYBE_UNUSED uint32_t color, MAYBE_UNUSED float alpha) {}
-static void glLegacyDrawSurfacePart(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID, MAYBE_UNUSED int32_t x, MAYBE_UNUSED int32_t y, MAYBE_UNUSED int32_t left, MAYBE_UNUSED int32_t top, MAYBE_UNUSED int32_t width, MAYBE_UNUSED int32_t height, MAYBE_UNUSED float xscale, MAYBE_UNUSED float yscale, MAYBE_UNUSED uint32_t color, MAYBE_UNUSED float alpha) {}
-static void glLegacyDrawSurfaceStretched(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID, MAYBE_UNUSED float x, MAYBE_UNUSED float y, MAYBE_UNUSED float width, MAYBE_UNUSED float height) {}
+static void glLegacyDrawSurface(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID, MAYBE_UNUSED int32_t srcLeft, MAYBE_UNUSED int32_t srcTop, MAYBE_UNUSED int32_t srcWidth, MAYBE_UNUSED int32_t srcHeight, MAYBE_UNUSED float x, MAYBE_UNUSED float y, MAYBE_UNUSED float xscale, MAYBE_UNUSED float yscale, MAYBE_UNUSED float angleDeg, MAYBE_UNUSED uint32_t color, MAYBE_UNUSED float alpha) {}
 static void glLegacySurfaceResize(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID, MAYBE_UNUSED int32_t width, MAYBE_UNUSED int32_t height) {}
 static void glLegacySurfaceFree(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID) {}
 static void glLegacySurfaceCopy(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t DestSurfaceID, MAYBE_UNUSED int32_t DestX, MAYBE_UNUSED int32_t DestY, MAYBE_UNUSED int32_t SrcSurfaceID, MAYBE_UNUSED int32_t SrcX, MAYBE_UNUSED int32_t SrcY, MAYBE_UNUSED int32_t SrcW, MAYBE_UNUSED int32_t SrcH, MAYBE_UNUSED bool part) {}
 static bool glLegacySurfaceGetPixels(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID, MAYBE_UNUSED uint8_t* outRGBA) { return false; }
+
+#endif
 
 
 // ===[ Vtable ]===
@@ -1352,18 +1619,16 @@ static RendererVtable glVtable = {
     .gpuSetAlphaTestEnable = glGpuSetAlphaTestEnable,
     .gpuSetAlphaTestRef = glGpuSetAlphaTestRef,
     .gpuSetColorWriteEnable = glGpuSetColorWriteEnable,
+    .gpuGetColorWriteEnable = glGpuGetColorWriteEnable,
     .gpuGetBlendEnable = glGpuGetBlendEnable,
     .drawTile = nullptr,
     .drawTiled = glDrawTiled,
     .createSurface = glLegacyCreateSurface,
     .surfaceExists = glLegacySurfaceExists,
-    .setSurfaceTarget = glLegacySetSurfaceTarget,
-    .resetSurfaceTarget = glLegacyResetSurfaceTarget,
+    .setRenderTarget = glLegacySetRenderTarget,
     .getSurfaceWidth = glLegacyGetSurfaceWidth,
     .getSurfaceHeight = glLegacyGetSurfaceHeight,
     .drawSurface = glLegacyDrawSurface,
-    .drawSurfacePart = glLegacyDrawSurfacePart,
-    .drawSurfaceStretched = glLegacyDrawSurfaceStretched,
     .surfaceResize = glLegacySurfaceResize,
     .surfaceFree = glLegacySurfaceFree,
     .surfaceCopy = glLegacySurfaceCopy,
@@ -1381,5 +1646,9 @@ Renderer* GLLegacyRenderer_create(void) {
     gl->base.drawHalign = 0;
     gl->base.drawValign = 0;
     gl->base.circlePrecision = 24;
+    gl->colorWriteR = true;
+    gl->colorWriteG = true;
+    gl->colorWriteB = true;
+    gl->colorWriteA = true;
     return (Renderer*) gl;
 }

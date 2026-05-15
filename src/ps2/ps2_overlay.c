@@ -304,13 +304,24 @@ void PS2Overlay_drawDebugOverlay(const Renderer* renderer, const Runner* runner,
     const char* roomName = runner->currentRoom != nullptr && runner->currentRoom->name != nullptr ? runner->currentRoom->name : "?";
 
     const char* thrashIndicator = "";
-    if (gsRenderer->chunksNeededThisFrame > gsRenderer->chunkCount) {
-        thrashIndicator = gsRenderer->diskLoadsThisFrame > 0 ? " [RAM+DISK THRASHING]" : " [RAM THRASHING]";
-    } else if (gsRenderer->diskLoadsThisFrame > 0) {
+    bool loadedFromRAM = gsRenderer->ramLoadsThisFrame != 0;
+    bool loadedFromDisk = gsRenderer->diskLoadsThisFrame != 0;
+
+    if (loadedFromRAM && loadedFromDisk) {
+        thrashIndicator = " [RAM+DISK THRASHING]";
+    } else if (loadedFromRAM) {
+        thrashIndicator = " [RAM THRASHING]";
+    } else if (loadedFromDisk) {
         thrashIndicator = " [DISK LOAD]";
     }
 
-    snprintf(debugText, sizeof(debugText), "Room: %s\nTick: %.2fms\nStep: %.2fms\nDraw: %.2fms\nAudio: %.2fms\nFree: %d bytes\nVRAM Free: %lu bytes\nRoom Speed: %u%s\nAtlas: (%u, %u, %u) [%u/%u]%s%s\nInstances: %d\nStructs: %d", roomName, (double) tick, (double) step, (double) draw, (double) audio, freeBytes, (unsigned long) vramFreeBytes, runner->currentRoom->speed, speedCapRemoved ? " [UNCAPPED]" : "", vramAtlasCount, eeramAtlasCount, gsRenderer->atlasCount, gsRenderer->chunksNeededThisFrame, gsRenderer->chunkCount, thrashIndicator, atlasSizeText, (int) arrlen(runner->instances), (int) arrlen(runner->structInstances));
+    int pinned = 0;
+    repeat(gsRenderer->chunkCount, i) {
+        if (gsRenderer->chunks[i].snapshotIdx != -1 || gsRenderer->chunks[i].surfaceIdx != -1)
+            pinned++;
+    }
+
+    snprintf(debugText, sizeof(debugText), "Room: %s\nTick: %.2fms\nStep: %.2fms\nDraw: %.2fms\nAudio: %.2fms\nFree: %d bytes\nVRAM Free: %lu bytes\nRoom Speed: %u%s\nAtlas: (%u, %u, %u) [%u/%u (%u pinned)]%s%s\nInstances: %d\nStructs: %d", roomName, (double) tick, (double) step, (double) draw, (double) audio, freeBytes, (unsigned long) vramFreeBytes, runner->currentRoom->speed, speedCapRemoved ? " [UNCAPPED]" : "", vramAtlasCount, eeramAtlasCount, gsRenderer->atlasCount, gsRenderer->chunksNeededThisFrame, gsRenderer->chunkCount, pinned, thrashIndicator, atlasSizeText, (int) arrlen(runner->instances), (int) arrlen(runner->structInstances));
     overlayPrint(10.0f, 10.0f, 10, 0.6f, debugColor, debugText);
 
     if (gOverlay.state == STATS_ENABLED_WITH_PROFILER) {
