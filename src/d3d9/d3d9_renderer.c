@@ -1337,15 +1337,15 @@ static bool d3d9_setRenderTargetInternal(Renderer* renderer, int32_t surfaceId) 
 }
 
 
-static bool d3d9_setSurfaceTarget(Renderer* renderer, int32_t surfaceId) {
+static bool d3d9_setRenderTarget(Renderer* renderer, int32_t surfaceID) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
 
     d3d9_flushBatch(dr);
     int32_t slot = d3d9_findSurfaceStackSlot(dr);
     if (slot == -1) return false;
 
-    dr->surfaceStack[slot] = surfaceId;
-    return d3d9_setRenderTargetInternal(renderer, surfaceId);
+    dr->surfaceStack[slot] = surfaceID;
+    return d3d9_setRenderTargetInternal(renderer, surfaceID);
 }
 
 static bool d3d9_resetSurfaceTarget(Renderer* renderer) {
@@ -1579,57 +1579,71 @@ static float d3d9_getSurfaceHeight(Renderer* renderer, int32_t surfaceId) {
     return (float)dr->surfaceHeight[surfaceId];
 }
 
-static void d3d9_drawSurface(Renderer* renderer, int32_t surfaceId,
-                             float x, float y, float xscale, float yscale,
-                             float angleDeg, uint32_t color, float alpha) {
+void d3d9_drawSurface(
+    Renderer* renderer,
+    int32_t surfaceID,
+    int32_t srcLeft,
+    int32_t srcTop,
+    int32_t srcWidth,
+    int32_t srcHeight,
+    float x,
+    float y,
+    float xscale,
+    float yscale,
+    float angleDeg,
+    uint32_t color,
+    float alpha
+)
+{
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
 
-    IDirect3DTexture9* tex = NULL;
-    int32_t texW = 0, texH = 0;
-
-    if (surfaceId >= 0) {
-        if ((uint32_t)surfaceId >= dr->ssurfaceCount) return;
-        tex  = dr->surfaceTexture[surfaceId];
-        texW = dr->surfaceWidth[surfaceId];
-        texH = dr->surfaceHeight[surfaceId];
-    } else {
-        tex  = dr->rtTexture;
-        texW = dr->rtWidth;
-        texH = dr->rtHeight;
-    }
+    // Look up the surface texture
+    IDirect3DTexture9* tex = dr->surfaceTexture[surfaceID];
     if (!tex) return;
 
-    if (dr->quadCount > 0 && dr->currentTexture != tex) d3d9_flushBatch(dr);
-    if (dr->quadCount >= MAX_QUADS) d3d9_flushBatch(dr);
-    dr->currentTexture = tex;
+    // Compute UVs
+    float u0 = (float)srcLeft / dr->surfaceWidth[surfaceID];
+    float v0 = (float)srcTop  / dr->surfaceHeight[surfaceID];
+    float u1 = (float)(srcLeft + srcWidth)  / dr->surfaceWidth[surfaceID];
+    float v1 = (float)(srcTop  + srcHeight) / dr->surfaceHeight[surfaceID];
 
-    float u0 = 0.0f, v0 = 0.0f;
-    float u1 = 1.0f, v1 = 1.0f;
+    // Compute destination quad
+    float w = srcWidth  * xscale;
+    float h = srcHeight * yscale;
 
-    float localX0 = 0.0f;
-    float localY0 = 0.0f;
-    float localX1 = (float)texW;
-    float localY1 = (float)texH;
+    float x0 = x;
+    float y0 = y;
+    float x1 = x + w;
+    float y1 = y;
+    float x2 = x + w;
+    float y2 = y + h;
+    float x3 = x;
+    float y3 = y + h;
 
-    float angleRad = -angleDeg * ((float)M_PI / 180.0f);
-    Matrix4f transform;
-    Matrix4f_setTransform2D(&transform, x, y, xscale, yscale, angleRad);
+    // Apply rotation if needed
+    if (angleDeg != 0.0f) {
+        float cx = x + w * 0.5f;
+        float cy = y + h * 0.5f;
+        float rad = -angleDeg * (float)M_PI / 180.0f;
 
-    float x0, y0, x1p, y1p, x2, y2, x3, y3;
-    Matrix4f_transformPoint(&transform, localX0, localY0, &x0,  &y0);
-    Matrix4f_transformPoint(&transform, localX1, localY0, &x1p, &y1p);
-    Matrix4f_transformPoint(&transform, localX1, localY1, &x2,  &y2);
-    Matrix4f_transformPoint(&transform, localX0, localY1, &x3,  &y3);
+        Matrix4f rot;
+        Matrix4f_setTransform2D(&rot, cx, cy, 1, 1, rad);
 
-    float r = (float)BGR_R(color) / 255.0f;
-    float g = (float)BGR_G(color) / 255.0f;
-    float b = (float)BGR_B(color) / 255.0f;
+        Matrix4f_transformPoint(&rot, x0 - cx, y0 - cy, &x0, &y0);
+        Matrix4f_transformPoint(&rot, x1 - cx, y1 - cy, &x1, &y1);
+        Matrix4f_transformPoint(&rot, x2 - cx, y2 - cy, &x2, &y2);
+        Matrix4f_transformPoint(&rot, x3 - cx, y3 - cy, &x3, &y3);
+    }
+
+    float r = BGR_R(color) / 255.0f;
+    float g = BGR_G(color) / 255.0f;
+    float b = BGR_B(color) / 255.0f;
 
     d3d9_emitTexturedQuad(dr, tex,
-                          x0,  y0,
-                          x1p, y1p,
-                          x2,  y2,
-                          x3,  y3,
+                          x0, y0,
+                          x1, y1,
+                          x2, y2,
+                          x3, y3,
                           u0, v0, u1, v1,
                           r, g, b, alpha);
 }
@@ -1941,6 +1955,20 @@ static void d3d9_deleteSprite(Renderer* renderer, int32_t spriteIndex) {
     fprintf(stderr, "D3D9: Deleted sprite %d\n", spriteIndex);
 }
 
+static void d3d9_gpuGetColorWriteEnable(Renderer* renderer,
+                                        bool* red, bool* green,
+                                        bool* blue, bool* alpha)
+{
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+
+    DWORD mask = 0;
+    IDirect3DDevice9_GetRenderState(dr->device, D3DRS_COLORWRITEENABLE, &mask);
+
+    if (red)   *red   = (mask & D3DCOLORWRITEENABLE_RED)   != 0;
+    if (green) *green = (mask & D3DCOLORWRITEENABLE_GREEN) != 0;
+    if (blue)  *blue  = (mask & D3DCOLORWRITEENABLE_BLUE)  != 0;
+    if (alpha) *alpha = (mask & D3DCOLORWRITEENABLE_ALPHA) != 0;
+}
 
 
 static void d3d9_drawRectangle(Renderer* renderer,
@@ -2029,43 +2057,55 @@ static RendererVtable d3d9Vtable = {
     .endView = d3d9_endView,
     .beginGUI = d3d9_beginGUI,
     .endGUI = d3d9_endGUI,
+
     .drawSprite = d3d9_drawSprite,
-    .drawSpritePos = d3d9_drawSpritePos,
     .drawSpritePart = d3d9_drawSpritePart,
+    .drawSpritePos = d3d9_drawSpritePos,
     .drawRectangle = d3d9_drawRectangle,
     .drawRectangleColor = d3d9_drawRectangleColor,
     .drawLine = d3d9_drawLine,
-    .drawLineColor = d3d9_drawLineColor,
     .drawTriangle = d3d9_drawTriangle,
+    .drawLineColor = d3d9_drawLineColor,
     .drawText = d3d9_drawText,
     .drawTextColor = d3d9_drawTextColor,
+
     .flush = d3d9_rendererFlush,
     .clearScreen = d3d9_clearScreen,
+
     .createSpriteFromSurface = d3d9_createSpriteFromSurface,
     .deleteSprite = d3d9_deleteSprite,
+
     .gpuSetBlendMode = d3d9_gpuSetBlendMode,
     .gpuSetBlendModeExt = d3d9_gpuSetBlendModeExt,
     .gpuSetBlendEnable = d3d9_gpuSetBlendEnable,
     .gpuSetAlphaTestEnable = d3d9_gpuSetAlphaTestEnable,
     .gpuSetAlphaTestRef = d3d9_gpuSetAlphaTestRef,
     .gpuSetColorWriteEnable = d3d9_gpuSetColorWriteEnable,
-    .gpuSetFog = d3d9_gpuSetFog,
+    .gpuGetColorWriteEnable = d3d9_gpuGetColorWriteEnable,
     .gpuGetBlendEnable = d3d9_gpuGetBlendEnable,
+    .gpuSetFog = d3d9_gpuSetFog,
+
     .drawTile = NULL,
+    .drawTiled = NULL,
+
     .createSurface = d3d9_createSurface,
     .surfaceExists = d3d9_surfaceExists,
-    .setSurfaceTarget = d3d9_setSurfaceTarget,
-    .resetSurfaceTarget = d3d9_resetSurfaceTarget,
-    .surfaceCopy = d3d9_surfaceCopy,
-    .surfaceGetPixels = d3d9_surfaceGetPixels,
+    .setRenderTarget = d3d9_setRenderTarget,
+
     .getSurfaceWidth = d3d9_getSurfaceWidth,
     .getSurfaceHeight = d3d9_getSurfaceHeight,
+
     .drawSurface = d3d9_drawSurface,
-    .drawSurfacePart = d3d9_drawSurfacePart,
-    .drawSurfaceStretched = d3d9_drawSurfaceStretched,
+
     .surfaceResize = d3d9_surfaceResize,
     .surfaceFree = d3d9_surfaceFree,
+
+    .surfaceCopy = d3d9_surfaceCopy,
+    .surfaceGetPixels = d3d9_surfaceGetPixels,
+
+    .drawTiledPart = NULL,
 };
+
 
 // ===[ Public API ]===
 
