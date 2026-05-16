@@ -51,20 +51,19 @@ static void d3d9_flushBatch(D3D9Renderer* dr) {
         float b = src[6];
         float a = src[7];
 
-dst[i].x   = x;
-dst[i].y   = y;
-dst[i].z   = 0.0f;
-dst[i].rhw = 1.0f;
+        dst[i].x   = x;
+        dst[i].y   = y;
+        dst[i].z   = 0.0f;
+        dst[i].rhw = 1.0f;
 
-uint8_t R = (uint8_t)(r * 255.0f);
-uint8_t G = (uint8_t)(g * 255.0f);
-uint8_t B = (uint8_t)(b * 255.0f);
-uint8_t A = (uint8_t)(a * 255.0f);
-dst[i].color = D3DCOLOR_ARGB(A, R, G, B);
+        uint8_t R = (uint8_t)(r * 255.0f);
+        uint8_t G = (uint8_t)(g * 255.0f);
+        uint8_t B = (uint8_t)(b * 255.0f);
+        uint8_t A = (uint8_t)(a * 255.0f);
+        dst[i].color = D3DCOLOR_ARGB(A, R, G, B);
 
-dst[i].u   = u;
-dst[i].v   = v;
-
+        dst[i].u   = u;
+        dst[i].v   = v;
 
         src += FLOATS_PER_VERTEX;
     }
@@ -76,13 +75,6 @@ dst[i].v   = v;
     IDirect3DDevice9_SetTexture(dr->device, 0, (IDirect3DBaseTexture9*)dr->currentTexture);
     IDirect3DDevice9_SetIndices(dr->device, dr->ib);
 
-/*
-IDirect3DBaseTexture9* bound = NULL;
-IDirect3DDevice9_GetTexture(dr->device, 0, &bound);
-printf("flush: currentTexture=%p boundTexture=%p\n", dr->currentTexture, bound);
-if (bound) IDirect3DBaseTexture9_Release(bound);
-*/
-
     IDirect3DDevice9_DrawIndexedPrimitive(
         dr->device, D3DPT_TRIANGLELIST,
         0, 0, vertexCount,
@@ -91,7 +83,6 @@ if (bound) IDirect3DBaseTexture9_Release(bound);
 
     dr->quadCount = 0;
 }
-
 
 // ===[ Texture helpers ]===
 
@@ -197,29 +188,35 @@ static void d3d9_emitTexturedQuad(
 
     float tx, ty;
 
+    // D3D9 pixel-center half-texel fix in screen space
+    const float half = 0.5f;
+
     // Vertex 0
     Matrix4f_transformPoint(&dr->viewMatrix, x0, y0, &tx, &ty);
+    tx += half; ty += half;
     verts[0] = tx; verts[1] = ty; verts[2] = u0; verts[3] = v0;
     verts[4] = r;  verts[5] = g;  verts[6] = b;  verts[7] = alpha;
 
     // Vertex 1
     Matrix4f_transformPoint(&dr->viewMatrix, x1, y1, &tx, &ty);
+    tx += half; ty += half;
     verts[8]  = tx; verts[9]  = ty; verts[10] = u1; verts[11] = v0;
     verts[12] = r;  verts[13] = g;  verts[14] = b;  verts[15] = alpha;
 
     // Vertex 2
     Matrix4f_transformPoint(&dr->viewMatrix, x2, y2, &tx, &ty);
+    tx += half; ty += half;
     verts[16] = tx; verts[17] = ty; verts[18] = u1; verts[19] = v1;
     verts[20] = r;  verts[21] = g;  verts[22] = b;  verts[23] = alpha;
 
     // Vertex 3
     Matrix4f_transformPoint(&dr->viewMatrix, x3, y3, &tx, &ty);
+    tx += half; ty += half;
     verts[24] = tx; verts[25] = ty; verts[26] = u0; verts[27] = v1;
     verts[28] = r;  verts[29] = g;  verts[30] = b;  verts[31] = alpha;
 
     dr->quadCount++;
 }
-
 
 typedef struct {
     Font* font;
@@ -276,12 +273,40 @@ static void d3d9_init(Renderer* renderer, DataWin* dataWin) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     renderer->dataWin = dataWin;
 
+    // Grab backbuffer ONCE
+    IDirect3DDevice9_GetRenderTarget(dr->device, 0, &dr->defaultColorRT);
+
+    D3DSURFACE_DESC bbDesc;
+    IDirect3DSurface9_GetDesc(dr->defaultColorRT, &bbDesc);
+    dr->bbWidth  = (int)bbDesc.Width;
+    dr->bbHeight = (int)bbDesc.Height;
+    dr->rtFormat = bbDesc.Format;
+
+    // Offscreen RT (created/resized in beginFrame)
+    dr->rtTexture = NULL;
+    dr->rtSurface = NULL;
+    dr->rtWidth = dr->rtHeight = 0;
+
+
     dr->maxQuads = MAX_QUADS;
     dr->quadCount = 0;
     dr->currentTexture = NULL;
 
     // Grab backbuffer
     IDirect3DDevice9_GetRenderTarget(dr->device, 0, &dr->defaultColorRT);
+
+    // Read backbuffer properties immediately so rtFormat is valid
+    if (dr->defaultColorRT) {
+        D3DSURFACE_DESC bbDesc;
+        IDirect3DSurface9_GetDesc(dr->defaultColorRT, &bbDesc);
+        dr->bbWidth  = (int)bbDesc.Width;
+        dr->bbHeight = (int)bbDesc.Height;
+        dr->rtFormat = bbDesc.Format;   // <-- IMPORTANT: initialize rtFormat here
+    } else {
+        dr->bbWidth  = 0;
+        dr->bbHeight = 0;
+        dr->rtFormat = D3DFMT_A8R8G8B8; // sane fallback, should normally not be hit
+    }
 
     // Create dynamic VB
     IDirect3DDevice9_CreateVertexBuffer(
@@ -316,7 +341,6 @@ static void d3d9_init(Renderer* renderer, DataWin* dataWin) {
     dr->surfaceHeight   = NULL;
     memset(dr->surfaceStack, -1, sizeof(dr->surfaceStack));
 
-
     uint16_t* indices = NULL;
     if (SUCCEEDED(IDirect3DIndexBuffer9_Lock(dr->ib, 0, 0, (void**)&indices, 0))) {
         for (int32_t i = 0; i < dr->maxQuads; ++i) {
@@ -331,7 +355,7 @@ static void d3d9_init(Renderer* renderer, DataWin* dataWin) {
         IDirect3DIndexBuffer9_Unlock(dr->ib);
     }
 
-    // Texture arrax2
+    // Texture arrays
     dr->textureCount   = dataWin->txtr.count;
     dr->d3dTextures    = safeCalloc(dr->textureCount, sizeof(IDirect3DTexture9*));
     dr->textureWidths  = safeCalloc(dr->textureCount, sizeof(int32_t));
@@ -340,7 +364,9 @@ static void d3d9_init(Renderer* renderer, DataWin* dataWin) {
 
     // White texture
     IDirect3DTexture9* white = NULL;
-    IDirect3DDevice9_CreateTexture(dr->device, 1, 1, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &white, NULL);
+    IDirect3DDevice9_CreateTexture(dr->device, 1, 1, 1, 0,
+                                   D3DFMT_A8R8G8B8, D3DPOOL_MANAGED,
+                                   &white, NULL);
     if (white) {
         D3DLOCKED_RECT lr;
         if (SUCCEEDED(IDirect3DTexture9_LockRect(white, 0, &lr, NULL, 0))) {
@@ -373,39 +399,44 @@ static void d3d9_init(Renderer* renderer, DataWin* dataWin) {
     IDirect3DDevice9_SetRenderState(dr->device, D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
     IDirect3DDevice9_SetRenderState(dr->device, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
 
-// 2D pipeline: disable lighting, depth, fog, culling
-IDirect3DDevice9_SetRenderState(dr->device, D3DRS_LIGHTING, FALSE);
-IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ZENABLE, D3DZB_FALSE);
-IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ZWRITEENABLE, FALSE);
-IDirect3DDevice9_SetRenderState(dr->device, D3DRS_CULLMODE, D3DCULL_NONE);
-IDirect3DDevice9_SetRenderState(dr->device, D3DRS_FOGENABLE, FALSE);
-IDirect3DDevice9_SetRenderState(dr->device, D3DRS_COLORVERTEX, FALSE);
+    // 2D pipeline: disable lighting, depth, fog, culling
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ZENABLE, D3DZB_FALSE);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ZWRITEENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_CULLMODE, D3DCULL_NONE);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_FOGENABLE, FALSE);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_COLORVERTEX, FALSE);
 
-// Texture stage 0: texture * vertex color
-IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLOROP,   D3DTOP_MODULATE);
-IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
-IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
+// Let vertex colors modulate the texture (GL-style)
+IDirect3DDevice9_SetRenderState(dr->device, D3DRS_COLORVERTEX, TRUE);
+IDirect3DDevice9_SetRenderState(dr->device, D3DRS_DIFFUSEMATERIALSOURCE, D3DMCS_COLOR1);
 
-// Alpha = texture alpha × vertex alpha
-IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAOP,   D3DTOP_MODULATE);
-IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
-IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
+    // Texture stage 0: texture * vertex color
+    IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLOROP,   D3DTOP_MODULATE);
+    IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_COLORARG2, D3DTA_DIFFUSE);
 
+    // Alpha = texture alpha × vertex alpha
+    IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAOP,   D3DTOP_MODULATE);
+    IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    IDirect3DDevice9_SetTextureStageState(dr->device, 0, D3DTSS_ALPHAARG2, D3DTA_DIFFUSE);
 
-// Sampler state
-IDirect3DDevice9_SetSamplerState(dr->device, 0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
-IDirect3DDevice9_SetSamplerState(dr->device, 0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    // Sampler state
+IDirect3DDevice9_SetSamplerState(dr->device, 0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+IDirect3DDevice9_SetSamplerState(dr->device, 0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
 IDirect3DDevice9_SetSamplerState(dr->device, 0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
 
+IDirect3DDevice9_SetSamplerState(dr->device, 0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+IDirect3DDevice9_SetSamplerState(dr->device, 0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
 
 
 
-
-    fprintf(stderr, "D3D9: Renderer initialized (%u texture pages)\n", dr->textureCount);
-
+    fprintf(stderr, "D3D9: Renderer initialized (%u texture pages, fmt=%d)\n",
+            dr->textureCount, dr->rtFormat);
 }
 
-static void d3d9_beginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH) {
+static void d3d9_beginFrame(Renderer* renderer, int32_t gameW, int32_t gameH,
+                            int32_t windowW, int32_t windowH) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
 
     dr->quadCount = 0;
@@ -415,17 +446,8 @@ static void d3d9_beginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, in
     dr->gameW = gameW;
     dr->gameH = gameH;
 
-    // Re-acquire backbuffer every frame (device may have been reset)
-    if (dr->defaultColorRT) {
-        IDirect3DSurface9_Release(dr->defaultColorRT);
-        dr->defaultColorRT = NULL;
-    }
-    IDirect3DDevice9_GetRenderTarget(dr->device, 0, &dr->defaultColorRT);
-
-    D3DSURFACE_DESC bbDesc;
-    IDirect3DSurface9_GetDesc(dr->defaultColorRT, &bbDesc);
-    dr->bbWidth  = (int)bbDesc.Width;
-    dr->bbHeight = (int)bbDesc.Height;
+    // DO NOT re-grab defaultColorRT here.
+    // bbWidth/bbHeight/rtFormat already cached in init.
 
     // Resize RT if needed
     if (gameW != dr->rtWidth || gameH != dr->rtHeight) {
@@ -433,27 +455,28 @@ static void d3d9_beginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, in
         if (dr->rtTexture) { IDirect3DTexture9_Release(dr->rtTexture); dr->rtTexture = NULL; }
 
         IDirect3DDevice9_CreateTexture(
-            dr->device, gameW, gameH, 1,
+            dr->device,
+            gameW, gameH,
+            1,
             D3DUSAGE_RENDERTARGET,
-            D3DFMT_A8R8G8B8,
+            dr->rtFormat,
             D3DPOOL_DEFAULT,
             &dr->rtTexture,
             NULL
         );
+
         if (dr->rtTexture) {
             IDirect3DTexture9_GetSurfaceLevel(dr->rtTexture, 0, &dr->rtSurface);
         }
 
         dr->rtWidth = gameW;
         dr->rtHeight = gameH;
-        fprintf(stderr, "D3D9: RT resized to %dx%d\n", gameW, gameH);
+        fprintf(stderr, "D3D9: RT resized to %dx%d (fmt=%d)\n", gameW, gameH, dr->rtFormat);
     }
 
-    // Bind RT
     if (dr->rtSurface) {
         IDirect3DDevice9_SetRenderTarget(dr->device, 0, dr->rtSurface);
 
-        // FIX: Reset viewport + scissor so GUI state never leaks into the RT
         D3DVIEWPORT9 vp = {
             0, 0,
             (DWORD)dr->rtWidth,
@@ -472,12 +495,8 @@ static void d3d9_beginFrame(Renderer* renderer, int32_t gameW, int32_t gameH, in
     renderer->CPortW = gameW;
     renderer->CPortH = gameH;
 
-    // Begin the scene
     IDirect3DDevice9_BeginScene(dr->device);
-
     IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ALPHATESTENABLE, FALSE);
-
-    // Clear color buffer (draw_clear is separate; this is just frame start)
     IDirect3DDevice9_Clear(dr->device, 0, NULL, D3DCLEAR_TARGET, 0x00000000, 1.0f, 0);
 }
 
@@ -528,6 +547,18 @@ static void d3d9_endFrame(Renderer* renderer) {
     IDirect3DSurface9* rtSurf = dr->rtSurface;
     IDirect3DSurface9* bbSurf = dr->defaultColorRT;
 
+/*
+D3DSURFACE_DESC srcDesc, dstDesc;
+IDirect3DSurface9_GetDesc(rtSurf, &srcDesc);
+IDirect3DSurface9_GetDesc(bbSurf, &dstDesc);
+
+fprintf(stderr,
+    "D3D9: StretchRect src=%p (%ux%u fmt=%d) dst=%p (%ux%u fmt=%d)\n",
+    rtSurf, srcDesc.Width, srcDesc.Height, srcDesc.Format,
+    bbSurf, dstDesc.Width, dstDesc.Height, dstDesc.Format);
+*/
+
+
     HRESULT hr = IDirect3DDevice9_StretchRect(
         dr->device, rtSurf, &src, bbSurf, &dst, D3DTEXF_POINT
     );
@@ -546,7 +577,7 @@ static void d3d9_beginView(Renderer* renderer,
     dr->quadCount = 0;
     dr->currentTexture = NULL;
 
-    // Full window viewport
+    // Viewport in render-target space (top-left origin, Y-down)
     D3DVIEWPORT9 vp = {
         (DWORD)portX,
         (DWORD)portY,
@@ -556,32 +587,42 @@ static void d3d9_beginView(Renderer* renderer,
     };
     IDirect3DDevice9_SetViewport(dr->device, &vp);
 
-    // Build world screen matrix
+    // Build world->screen matrix to mirror GL's behaviour
     Matrix4f cam;
     Matrix4f_identity(&cam);
 
-    // Scale world to viewport 
+    // 1) Optional rotation around the *world* view center
+    if (viewAngle != 0.0f) {
+        float cx = (float)viewX + (float)viewW * 0.5f;
+        float cy = (float)viewY + (float)viewH * 0.5f;
+        float angleRad = viewAngle * (float)M_PI / 180.0f;
+
+        Matrix4f rot;
+        Matrix4f_identity(&rot);
+        Matrix4f_translate(&rot, cx, cy, 0.0f);
+        Matrix4f_rotateZ(&rot, -angleRad); // same sign convention as GL path
+        Matrix4f_translate(&rot, -cx, -cy, 0.0f);
+
+        Matrix4f tmp;
+        Matrix4f_multiply(&tmp, &cam, &rot);
+        cam = tmp;
+    }
+
+    // 2) Scroll: move world so that (viewX,viewY) becomes origin
+    Matrix4f_translate(&cam, -(float)viewX, -(float)viewY, 0.0f);
+
+    // 3) Scale world to port size (same as GL ortho + viewport)
     float sx = (float)portW / (float)viewW;
     float sy = (float)portH / (float)viewH;
     Matrix4f_scale(&cam, sx, sy, 1.0f);
 
-    // Translate world by -viewX, -viewY (scrolling)
-    Matrix4f_translate(&cam, -viewX, -viewY, 0.0f);
-
-    // Optional rotation (around view center)
-    if (viewAngle != 0.0f) {
-        float cx = viewW * 0.5f;
-        float cy = viewH * 0.5f;
-        Matrix4f_translate(&cam, cx, cy, 0.0f);
-        Matrix4f_rotateZ(&cam, -viewAngle * (float)M_PI / 180.0f);
-        Matrix4f_translate(&cam, -cx, -cy, 0.0f);
-    }
-
-    // 4. Move into viewport position
+    // 4) Move into viewport position in RT space
     Matrix4f_translate(&cam, (float)portX, (float)portY, 0.0f);
 
+    // No half-texel correction here; XYZRHW is already in pixel space
     dr->viewMatrix = cam;
 }
+
 
 static void d3d9_endView(Renderer* renderer) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
@@ -747,6 +788,7 @@ static void d3d9_gpuSetFog(Renderer* renderer, bool enable, uint32_t color) {
     IDirect3DDevice9_SetRenderState(dr->device, D3DRS_FOGCOLOR, c);
 }
 
+// ===[ Draw full sprite ]===
 static void d3d9_drawSprite(Renderer* renderer,
                             int32_t tpagIndex,
                             float x, float y,
@@ -756,37 +798,22 @@ static void d3d9_drawSprite(Renderer* renderer,
                             uint32_t color,
                             float alpha)
 {
-
-//printf("D3D9 drawSprite tpag=%d\n", tpagIndex);
-
-
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
-    DataWin* dw = renderer->dataWin;
-
     TexturePageItem* tpag;
     IDirect3DTexture9* tex;
     int32_t texW, texH;
 
     if (!d3d9_resolveSpriteTexture(dr, tpagIndex, &tpag, &tex, &texW, &texH)) return;
 
-
-/*
-printf("tpag=%d src=(%d,%d %dx%d) page=%d tex=%dx%d\n",
-       tpagIndex,
-       tpag->sourceX, tpag->sourceY,
-       tpag->sourceWidth, tpag->sourceHeight,
-       tpag->texturePageId,
-       texW, texH);
-*/
-
-
+    // UVs: same as GL
     float u0 = (float)tpag->sourceX / (float)texW;
     float v0 = (float)tpag->sourceY / (float)texH;
     float u1 = (float)(tpag->sourceX + tpag->sourceWidth) / (float)texW;
     float v1 = (float)(tpag->sourceY + tpag->sourceHeight) / (float)texH;
 
-    float localX0 = -originX;
-    float localY0 = -originY;
+    // IMPORTANT: match GL's use of targetX/targetY
+    float localX0 = (float)tpag->targetX - originX;
+    float localY0 = (float)tpag->targetY - originY;
     float localX1 = localX0 + (float)tpag->sourceWidth;
     float localY1 = localY0 + (float)tpag->sourceHeight;
 
@@ -811,11 +838,9 @@ printf("tpag=%d src=(%d,%d %dx%d) page=%d tex=%dx%d\n",
                           x3,  y3,
                           u0, v0, u1, v1,
                           r, g, b, alpha);
-
-
 }
 
-
+// ===[ Draw sprite with explicit vertex positions ]===
 static void d3d9_drawSpritePos(Renderer* renderer,
                                int32_t tpagIndex,
                                float x1, float y1,
@@ -836,7 +861,6 @@ static void d3d9_drawSpritePos(Renderer* renderer,
     float u1 = (float)(tpag->sourceX + tpag->sourceWidth) / (float)texW;
     float v1 = (float)(tpag->sourceY + tpag->sourceHeight) / (float)texH;
 
-    // Color is baked into vertices elsewhere for this path; use white here.
     float r = 1.0f, g = 1.0f, b = 1.0f;
 
     d3d9_emitTexturedQuad(dr, tex,
@@ -848,6 +872,7 @@ static void d3d9_drawSpritePos(Renderer* renderer,
                           r, g, b, alpha);
 }
 
+// ===[ Draw partial sprite region ]===
 static void d3d9_drawSpritePart(Renderer* renderer,
                                 int32_t tpagIndex,
                                 int32_t srcOffX, int32_t srcOffY,
@@ -874,6 +899,7 @@ static void d3d9_drawSpritePart(Renderer* renderer,
     float u1 = (float)(sx + srcW) / (float)texW;
     float v1 = (float)(sy + srcH) / (float)texH;
 
+    // For draw_sprite_part, GL ignores sprite origin; pivot is explicit
     float localX0 = -pivotX;
     float localY0 = -pivotY;
     float localX1 = localX0 + (float)srcW;
@@ -901,7 +927,6 @@ static void d3d9_drawSpritePart(Renderer* renderer,
                           u0, v0, u1, v1,
                           r, g, b, alpha);
 }
-
 
 static bool d3d9_resolveFontState(D3D9Renderer* dr, DataWin* dw, Font* font, D3D9FontState* state) {
     state->font = font;
@@ -1301,7 +1326,8 @@ static bool d3d9_setRenderTargetInternal(Renderer* renderer, int32_t surfaceId) 
 
     if (surfaceId >= 0) {
         if ((uint32_t)surfaceId >= dr->ssurfaceCount) return false;
-        if (dr->surfaces[surfaceId] == NULL) return false;
+        if (!dr->surfaces[surfaceId]) return false;
+
         target = dr->surfaces[surfaceId];
         w = dr->surfaceWidth[surfaceId];
         h = dr->surfaceHeight[surfaceId];
@@ -1312,21 +1338,29 @@ static bool d3d9_setRenderTargetInternal(Renderer* renderer, int32_t surfaceId) 
         h = dr->rtHeight;
     }
 
-    if (FAILED(IDirect3DDevice9_SetRenderTarget(dr->device, 0, target))) {
+    if (FAILED(IDirect3DDevice9_SetRenderTarget(dr->device, 0, target)))
         return false;
-    }
 
-    D3DVIEWPORT9 vp;
-    vp.X = 0;
-    vp.Y = 0;
-    vp.Width  = (DWORD)w;
-    vp.Height = (DWORD)h;
-    vp.MinZ = 0.0f;
-    vp.MaxZ = 1.0f;
+    // Reset viewport
+    D3DVIEWPORT9 vp = {0, 0, (DWORD)w, (DWORD)h, 0.0f, 1.0f};
     IDirect3DDevice9_SetViewport(dr->device, &vp);
 
-    // Build orthographic projection (Y-down) for surfaces; application_surface uses PreviousViewMatrix
+    // Reset blend state (GM does this)
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ALPHABLENDENABLE, TRUE);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+
+    // Clear user-created surfaces (GM behaviour)
     if (surfaceId >= 0) {
+        IDirect3DDevice9_Clear(
+            dr->device,
+            0, NULL,
+            D3DCLEAR_TARGET,
+            D3DCOLOR_ARGB(0, 0, 0, 0),
+            1.0f, 0
+        );
+
+        // Build orthographic projection for surfaces
         Matrix4f projection;
         Matrix4f_identity(&projection);
         Matrix4f_ortho(&projection, 0.0f, (float)w, (float)h, 0.0f, -1.0f, 1.0f);
@@ -1365,14 +1399,20 @@ static int32_t d3d9_createSurface(Renderer* renderer, int32_t width, int32_t hei
     uint32_t idx = d3d9_findOrAllocSurfaceSlot(dr);
 
     IDirect3DTexture9* tex = NULL;
+
+    // *** CRITICAL FIX ***
+    // Use the SAME FORMAT as the backbuffer / main RT
+    D3DFORMAT fmt = dr->rtFormat;
+
     if (FAILED(IDirect3DDevice9_CreateTexture(
             dr->device,
             (UINT)width, (UINT)height,
             1,
             D3DUSAGE_RENDERTARGET,
-            D3DFMT_A8R8G8B8,
+            fmt,                    // ← FIXED
             D3DPOOL_DEFAULT,
             &tex, NULL))) {
+        fprintf(stderr, "D3D9: CreateSurface FAILED (%dx%d fmt=%d)\n", width, height, fmt);
         return -1;
     }
 
@@ -1387,7 +1427,10 @@ static int32_t d3d9_createSurface(Renderer* renderer, int32_t width, int32_t hei
     dr->surfaceWidth[idx]   = width;
     dr->surfaceHeight[idx]  = height;
 
-    fprintf(stderr, "D3D9: Created surface %u (%dx%d)\n", idx, width, height);
+    if (idx >= dr->ssurfaceCount)
+        dr->ssurfaceCount = idx + 1;
+
+    fprintf(stderr, "D3D9: Created surface %u (%dx%d fmt=%d)\n", idx, width, height, fmt);
     return (int32_t)idx;
 }
 
