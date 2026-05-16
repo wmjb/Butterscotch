@@ -71,6 +71,9 @@ int bbHeight;
     float* vertexData; // MAX_QUADS * VERTICES_PER_QUAD * FLOATS_PER_VERTEX
 
 Matrix4f viewMatrix;
+D3DFORMAT rtFormat;   // backbuffer-compatible render target format
+    bool guiBeganThisFrame;
+    bool inGUI;
 
 
 } D3D9Renderer;
