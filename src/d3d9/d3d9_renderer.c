@@ -188,30 +188,23 @@ static void d3d9_emitTexturedQuad(
 
     float tx, ty;
 
-    // D3D9 pixel-center half-texel fix in screen space
-    const float half = 0.5f;
-
     // Vertex 0
     Matrix4f_transformPoint(&dr->viewMatrix, x0, y0, &tx, &ty);
-    tx += half; ty += half;
     verts[0] = tx; verts[1] = ty; verts[2] = u0; verts[3] = v0;
     verts[4] = r;  verts[5] = g;  verts[6] = b;  verts[7] = alpha;
 
     // Vertex 1
     Matrix4f_transformPoint(&dr->viewMatrix, x1, y1, &tx, &ty);
-    tx += half; ty += half;
     verts[8]  = tx; verts[9]  = ty; verts[10] = u1; verts[11] = v0;
     verts[12] = r;  verts[13] = g;  verts[14] = b;  verts[15] = alpha;
 
     // Vertex 2
     Matrix4f_transformPoint(&dr->viewMatrix, x2, y2, &tx, &ty);
-    tx += half; ty += half;
     verts[16] = tx; verts[17] = ty; verts[18] = u1; verts[19] = v1;
     verts[20] = r;  verts[21] = g;  verts[22] = b;  verts[23] = alpha;
 
     // Vertex 3
     Matrix4f_transformPoint(&dr->viewMatrix, x3, y3, &tx, &ty);
-    tx += half; ty += half;
     verts[24] = tx; verts[25] = ty; verts[26] = u0; verts[27] = v1;
     verts[28] = r;  verts[29] = g;  verts[30] = b;  verts[31] = alpha;
 
@@ -567,6 +560,8 @@ fprintf(stderr,
         fprintf(stderr, "D3D9: StretchRect failed: 0x%08X\n", hr);
     }
 }
+
+
 static void d3d9_beginView(Renderer* renderer,
                            int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH,
                            int32_t portX, int32_t portY, int32_t portW, int32_t portH,
@@ -577,7 +572,7 @@ static void d3d9_beginView(Renderer* renderer,
     dr->quadCount = 0;
     dr->currentTexture = NULL;
 
-    // Viewport in render-target space (top-left origin, Y-down)
+    // Viewport
     D3DVIEWPORT9 vp = {
         (DWORD)portX,
         (DWORD)portY,
@@ -587,40 +582,44 @@ static void d3d9_beginView(Renderer* renderer,
     };
     IDirect3DDevice9_SetViewport(dr->device, &vp);
 
-    // Build world->screen matrix to mirror GL's behaviour
-    Matrix4f cam;
-    Matrix4f_identity(&cam);
+    // *** Match GL: update current port on the base renderer ***
+    renderer->CPortX = portX;
+    renderer->CPortY = portY;      // no Y-flip in D3D9
+    renderer->CPortW = portW;
+    renderer->CPortH = portH;
 
-    // 1) Optional rotation around the *world* view center
-    if (viewAngle != 0.0f) {
-        float cx = (float)viewX + (float)viewW * 0.5f;
-        float cy = (float)viewY + (float)viewH * 0.5f;
-        float angleRad = viewAngle * (float)M_PI / 180.0f;
+Matrix4f cam;
+Matrix4f_identity(&cam);
 
-        Matrix4f rot;
-        Matrix4f_identity(&rot);
-        Matrix4f_translate(&rot, cx, cy, 0.0f);
-        Matrix4f_rotateZ(&rot, -angleRad); // same sign convention as GL path
-        Matrix4f_translate(&rot, -cx, -cy, 0.0f);
+// 1) rotation (unchanged)
+if (viewAngle != 0.0f) {
+    float cx = viewX + viewW * 0.5f;
+    float cy = viewY + viewH * 0.5f;
+    float angleRad = viewAngle * (float)M_PI / 180.0f;
 
-        Matrix4f tmp;
-        Matrix4f_multiply(&tmp, &cam, &rot);
-        cam = tmp;
-    }
+    Matrix4f rot;
+    Matrix4f_identity(&rot);
+    Matrix4f_translate(&rot, cx, cy, 0.0f);
+    Matrix4f_rotateZ(&rot, -angleRad);
+    Matrix4f_translate(&rot, -cx, -cy, 0.0f);
 
-    // 2) Scroll: move world so that (viewX,viewY) becomes origin
-    Matrix4f_translate(&cam, -(float)viewX, -(float)viewY, 0.0f);
+    Matrix4f tmp;
+    Matrix4f_multiply(&tmp, &cam, &rot);
+    cam = tmp;
+}
 
-    // 3) Scale world to port size (same as GL ortho + viewport)
-    float sx = (float)portW / (float)viewW;
-    float sy = (float)portH / (float)viewH;
-    Matrix4f_scale(&cam, sx, sy, 1.0f);
+// 2) scale FIRST (GL-style)
+float sx = (float)portW / (float)viewW;
+float sy = (float)portH / (float)viewH;
+Matrix4f_scale(&cam, sx, sy, 1.0f);
 
-    // 4) Move into viewport position in RT space
-    Matrix4f_translate(&cam, (float)portX, (float)portY, 0.0f);
+// 3) THEN translate world into view
+Matrix4f_translate(&cam, -(float)viewX, -(float)viewY, 0.0f);
 
-    // No half-texel correction here; XYZRHW is already in pixel space
-    dr->viewMatrix = cam;
+// 4) THEN move into viewport
+Matrix4f_translate(&cam, (float)portX, (float)portY, 0.0f);
+
+dr->viewMatrix = cam;
 }
 
 
@@ -690,6 +689,10 @@ static void d3d9_beginGUI(Renderer* renderer,
     // Reset batching state
     dr->quadCount = 0;
     dr->currentTexture = NULL;
+
+// After setting GUI projection
+Matrix4f_identity(&dr->viewMatrix);
+
 }
 
 static void d3d9_endGUI(Renderer* renderer)
@@ -699,6 +702,10 @@ static void d3d9_endGUI(Renderer* renderer)
 
     // Restore world state
     IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ALPHATESTENABLE, FALSE);
+
+// Restore world transform for next beginView
+Matrix4f_identity(&dr->viewMatrix);
+
 }
 
 
@@ -2014,6 +2021,28 @@ static void d3d9_gpuGetColorWriteEnable(Renderer* renderer,
 }
 
 
+// ===[ Helper: colored quad using whiteTexture ]===
+
+static void d3d9_emitColoredQuad(D3D9Renderer* dr,
+                                 float x0, float y0,
+                                 float x1, float y1,
+                                 float r, float g, float b, float a)
+{
+    // All UVs point to center of 1x1 white texture
+    float u = 0.5f, v = 0.5f;
+
+    d3d9_emitTexturedQuad(dr, dr->whiteTexture,
+                          x0, y0,
+                          x1, y0,
+                          x1, y1,
+                          x0, y1,
+                          u, v, u, v,
+                          r, g, b, a);
+}
+
+
+// ===[ Rectangle ]===
+
 static void d3d9_drawRectangle(Renderer* renderer,
                                float x1, float y1,
                                float x2, float y2,
@@ -2021,24 +2050,26 @@ static void d3d9_drawRectangle(Renderer* renderer,
                                float alpha,
                                bool outline)
 {
-    (void)renderer; (void)x1; (void)y1; (void)x2; (void)y2;
-    (void)color; (void)alpha; (void)outline;
-    // TODO: implement D3D9 rectangle drawing
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+
+    float r = (float)BGR_R(color) / 255.0f;
+    float g = (float)BGR_G(color) / 255.0f;
+    float b = (float)BGR_B(color) / 255.0f;
+
+    if (outline) {
+        // 4 one-pixel edges: top, bottom, left, right
+        d3d9_emitColoredQuad(dr, x1,     y1,     x2 + 1.0f, y1 + 1.0f, r, g, b, alpha); // top
+        d3d9_emitColoredQuad(dr, x1,     y2,     x2 + 1.0f, y2 + 1.0f, r, g, b, alpha); // bottom
+        d3d9_emitColoredQuad(dr, x1,     y1 + 1.0f, x1 + 1.0f, y2,     r, g, b, alpha); // left
+        d3d9_emitColoredQuad(dr, x2,     y1 + 1.0f, x2 + 1.0f, y2,     r, g, b, alpha); // right
+    } else {
+        // Filled rect: GML adds +1 to width/height
+        d3d9_emitColoredQuad(dr, x1, y1, x2 + 1.0f, y2 + 1.0f, r, g, b, alpha);
+    }
 }
 
-static void d3d9_drawRectangleColor(Renderer* renderer,
-                                    float x1, float y1,
-                                    float x2, float y2,
-                                    uint32_t c1, uint32_t c2,
-                                    uint32_t c3, uint32_t c4,
-                                    float alpha,
-                                    bool outline)
-{
-    (void)renderer; (void)x1; (void)y1; (void)x2; (void)y2;
-    (void)c1; (void)c2; (void)c3; (void)c4;
-    (void)alpha; (void)outline;
-    // TODO: implement D3D9 gradient rectangle drawing
-}
+
+// ===[ Line ]===
 
 static void d3d9_drawLine(Renderer* renderer,
                           float x1, float y1,
@@ -2047,9 +2078,31 @@ static void d3d9_drawLine(Renderer* renderer,
                           uint32_t color,
                           float alpha)
 {
-    (void)renderer; (void)x1; (void)y1; (void)x2; (void)y2;
-    (void)width; (void)color; (void)alpha;
-    // TODO: implement D3D9 line drawing
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+
+    float r = (float)BGR_R(color) / 255.0f;
+    float g = (float)BGR_G(color) / 255.0f;
+    float b = (float)BGR_B(color) / 255.0f;
+
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.0001f) return;
+
+    float halfW = width * 0.5f;
+    float px = (-dy / len) * halfW;
+    float py = (dx / len) * halfW;
+
+    // Use whiteTexture quad with per-vertex color
+    float u = 0.5f, v = 0.5f;
+
+    d3d9_emitTexturedQuad(dr, dr->whiteTexture,
+                          x1 + px, y1 + py,
+                          x1 - px, y1 - py,
+                          x2 - px, y2 - py,
+                          x2 + px, y2 + py,
+                          u, v, u, v,
+                          r, g, b, alpha);
 }
 
 static void d3d9_drawLineColor(Renderer* renderer,
@@ -2060,10 +2113,124 @@ static void d3d9_drawLineColor(Renderer* renderer,
                                uint32_t color2,
                                float alpha)
 {
-    (void)renderer; (void)x1; (void)y1; (void)x2; (void)y2;
-    (void)width; (void)color1; (void)color2; (void)alpha;
-    // TODO: implement D3D9 gradient line drawing
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+
+    float r1 = (float)BGR_R(color1) / 255.0f;
+    float g1 = (float)BGR_G(color1) / 255.0f;
+    float b1 = (float)BGR_B(color1) / 255.0f;
+
+    float r2 = (float)BGR_R(color2) / 255.0f;
+    float g2 = (float)BGR_G(color2) / 255.0f;
+    float b2 = (float)BGR_B(color2) / 255.0f;
+
+    float dx = x2 - x1;
+    float dy = y2 - y1;
+    float len = sqrtf(dx * dx + dy * dy);
+    if (len < 0.0001f) return;
+
+    float halfW = width * 0.5f;
+    float px = (-dy / len) * halfW;
+    float py = (dx / len) * halfW;
+
+    float u = 0.5f, v = 0.5f;
+
+    // Start side (color1), end side (color2)
+    if (dr->quadCount > 0 && dr->currentTexture != dr->whiteTexture)
+        d3d9_flushBatch(dr);
+    if (dr->quadCount >= MAX_QUADS)
+        d3d9_flushBatch(dr);
+    dr->currentTexture = dr->whiteTexture;
+
+    float* verts = dr->vertexData + dr->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
+
+    // v0: start + perp (color1)
+    verts[0] = x1 + px; verts[1] = y1 + py; verts[2] = u; verts[3] = v;
+    verts[4] = r1;      verts[5] = g1;      verts[6] = b1; verts[7] = alpha;
+
+    // v1: start - perp (color1)
+    verts[8]  = x1 - px; verts[9]  = y1 - py; verts[10] = u; verts[11] = v;
+    verts[12] = r1;      verts[13] = g1;      verts[14] = b1; verts[15] = alpha;
+
+    // v2: end - perp (color2)
+    verts[16] = x2 - px; verts[17] = y2 - py; verts[18] = u; verts[19] = v;
+    verts[20] = r2;      verts[21] = g2;      verts[22] = b2; verts[23] = alpha;
+
+    // v3: end + perp (color2)
+    verts[24] = x2 + px; verts[25] = y2 + py; verts[26] = u; verts[27] = v;
+    verts[28] = r2;      verts[29] = g2;      verts[30] = b2; verts[31] = alpha;
+
+    dr->quadCount++;
 }
+
+
+// ===[ Gradient rectangle ]===
+
+static void d3d9_drawRectangleColor(Renderer* renderer,
+                                    float x1, float y1,
+                                    float x2, float y2,
+                                    uint32_t c1, uint32_t c2,
+                                    uint32_t c3, uint32_t c4,
+                                    float alpha,
+                                    bool outline)
+{
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+
+    float r1 = (float)BGR_R(c1) / 255.0f;
+    float g1 = (float)BGR_G(c1) / 255.0f;
+    float b1 = (float)BGR_B(c1) / 255.0f;
+
+    float r2 = (float)BGR_R(c2) / 255.0f;
+    float g2 = (float)BGR_G(c2) / 255.0f;
+    float b2 = (float)BGR_B(c2) / 255.0f;
+
+    float r3 = (float)BGR_R(c3) / 255.0f;
+    float g3 = (float)BGR_G(c3) / 255.0f;
+    float b3 = (float)BGR_B(c3) / 255.0f;
+
+    float r4 = (float)BGR_R(c4) / 255.0f;
+    float g4 = (float)BGR_G(c4) / 255.0f;
+    float b4 = (float)BGR_B(c4) / 255.0f;
+
+    if (outline) {
+        // Use gradient lines for edges
+        d3d9_drawLineColor(renderer, x1, y1, x2, y1, 1.0f, c1, c2, alpha);
+        d3d9_drawLineColor(renderer, x2, y1, x2, y2, 1.0f, c2, c3, alpha);
+        d3d9_drawLineColor(renderer, x2, y2, x1, y2, 1.0f, c3, c4, alpha);
+        d3d9_drawLineColor(renderer, x1, y2, x1, y1, 1.0f, c4, c1, alpha);
+        return;
+    }
+
+    // Filled gradient rect: +1 to width/height
+    if (dr->quadCount > 0 && dr->currentTexture != dr->whiteTexture)
+        d3d9_flushBatch(dr);
+    if (dr->quadCount >= MAX_QUADS)
+        d3d9_flushBatch(dr);
+    dr->currentTexture = dr->whiteTexture;
+
+    float* verts = dr->vertexData + dr->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
+    float u = 0.5f, v = 0.5f;
+
+    // v0: top-left (c1)
+    verts[0] = x1;       verts[1] = y1;       verts[2] = u; verts[3] = v;
+    verts[4] = r1;       verts[5] = g1;       verts[6] = b1; verts[7] = alpha;
+
+    // v1: top-right (c2)
+    verts[8]  = x2 + 1;  verts[9]  = y1;       verts[10] = u; verts[11] = v;
+    verts[12] = r2;      verts[13] = g2;      verts[14] = b2; verts[15] = alpha;
+
+    // v2: bottom-right (c3)
+    verts[16] = x2 + 1;  verts[17] = y2 + 1;  verts[18] = u; verts[19] = v;
+    verts[20] = r3;      verts[21] = g3;      verts[22] = b3; verts[23] = alpha;
+
+    // v3: bottom-left (c4)
+    verts[24] = x1;      verts[25] = y2 + 1;  verts[26] = u; verts[27] = v;
+    verts[28] = r4;      verts[29] = g4;      verts[30] = b4; verts[31] = alpha;
+
+    dr->quadCount++;
+}
+
+
+// ===[ Triangle ]===
 
 static void d3d9_drawTriangle(Renderer* renderer,
                               float x1, float y1,
@@ -2071,23 +2238,90 @@ static void d3d9_drawTriangle(Renderer* renderer,
                               float x3, float y3,
                               bool outline)
 {
-    (void)renderer; (void)x1; (void)y1; (void)x2; (void)y2;
-    (void)x3; (void)y3; (void)outline;
-    // TODO: implement D3D9 triangle drawing
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+
+    if (outline) {
+        d3d9_drawLine(renderer, x1, y1, x2, y2, 1.0f, renderer->drawColor, 1.0f);
+        d3d9_drawLine(renderer, x2, y2, x3, y3, 1.0f, renderer->drawColor, 1.0f);
+        d3d9_drawLine(renderer, x3, y3, x1, y1, 1.0f, renderer->drawColor, 1.0f);
+        return;
+    }
+
+    float r = (float)BGR_R(renderer->drawColor) / 255.0f;
+    float g = (float)BGR_G(renderer->drawColor) / 255.0f;
+    float b = (float)BGR_B(renderer->drawColor) / 255.0f;
+    float a = renderer->drawAlpha;
+
+    d3d9_flushBatch(dr);
+
+    D3D9Vertex verts[3];
+    for (int i = 0; i < 3; ++i) {
+        verts[i].z   = 0.0f;
+        verts[i].rhw = 1.0f;
+        verts[i].u   = 0.5f;
+        verts[i].v   = 0.5f;
+        verts[i].color = D3DCOLOR_ARGB(
+            (uint8_t)(a * 255.0f),
+            (uint8_t)(r * 255.0f),
+            (uint8_t)(g * 255.0f),
+            (uint8_t)(b * 255.0f)
+        );
+    }
+
+    verts[0].x = x1; verts[0].y = y1;
+    verts[1].x = x2; verts[1].y = y2;
+    verts[2].x = x3; verts[2].y = y3;
+
+    IDirect3DDevice9_SetFVF(dr->device, D3D9_FVF);
+    IDirect3DDevice9_SetTexture(dr->device, 0, (IDirect3DBaseTexture9*)dr->whiteTexture);
+    IDirect3DDevice9_DrawPrimitiveUP(dr->device,
+                                     D3DPT_TRIANGLELIST,
+                                     1,
+                                     verts,
+                                     sizeof(D3D9Vertex));
 }
 
 
+// ===[ Blend modes ]===
+// Minimal, non-crashing versions; you can refine mapping to GMS enums later.
+
 static void d3d9_gpuSetBlendMode(Renderer* renderer, int32_t mode)
 {
-    (void)renderer; (void)mode;
-    // TODO: map GMS blend mode to D3D9 render states
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    d3d9_flushBatch(dr);
+
+    // Default: normal alpha blending
+    DWORD src = D3DBLEND_SRCALPHA;
+    DWORD dst = D3DBLEND_INVSRCALPHA;
+    DWORD op  = D3DBLENDOP_ADD;
+
+    // You can wire real GMS constants here if you want exact behaviour
+    switch (mode) {
+    // case bm_add:      src = D3DBLEND_SRCALPHA; dst = D3DBLEND_ONE;        op = D3DBLENDOP_ADD;        break;
+    // case bm_subtract: src = D3DBLEND_SRCALPHA; dst = D3DBLEND_INVSRCALPHA; op = D3DBLENDOP_REVSUBTRACT; break;
+    default:
+        break;
+    }
+
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ALPHABLENDENABLE, TRUE);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_SRCBLEND, src);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_DESTBLEND, dst);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_BLENDOP, op);
 }
 
 static void d3d9_gpuSetBlendModeExt(Renderer* renderer, int32_t sfactor, int32_t dfactor)
 {
-    (void)renderer; (void)sfactor; (void)dfactor;
-    // TODO: map extended blend factors to D3D9 render states
+    D3D9Renderer* dr = (D3D9Renderer*)renderer;
+    d3d9_flushBatch(dr);
+
+    // For now, treat all extended modes as normal alpha blend.
+    // You can later map sfactor/dfactor to D3DBLEND_* once you line up the enums.
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_ALPHABLENDENABLE, TRUE);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_SRCBLEND,  D3DBLEND_SRCALPHA);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    IDirect3DDevice9_SetRenderState(dr->device, D3DRS_BLENDOP,   D3DBLENDOP_ADD);
 }
+
 
 // ===[ Vtable ]===
 
