@@ -5350,6 +5350,77 @@ static RValue builtin_instance_deactivate_object(VMContext* ctx, RValue* args, i
     return RValue_makeUndefined();
 }
 
+static RValue builtin_instance_activate_region(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (5 > argCount) return RValue_makeUndefined();
+    Runner* runner = ctx->runner;
+    DataWin* dataWin = ctx->dataWin;
+    GMLReal left = RValue_toReal(args[0]);
+    GMLReal top = RValue_toReal(args[1]);
+    GMLReal width = RValue_toReal(args[2]);
+    GMLReal height = RValue_toReal(args[3]);
+    bool wantInside = RValue_toBool(args[4]);
+
+    GMLReal right = left + width - 1;
+    GMLReal bottom = top + height - 1;
+
+    // We don't use SpatialGrid here because inactive instances are NOT included in the SpatialGrid
+    int instances = arrlen(runner->instances);
+    repeat(instances, i) {
+        Instance* inst = runner->instances[i];
+        if (inst->active || inst->destroyed) continue;
+
+        bool outside = false;
+        Sprite* spr = Collision_getSprite(dataWin, inst);
+        if (spr != nullptr) {
+            InstanceBBox bbox = Collision_computeBBox(dataWin, inst);
+            if (bbox.right < left || bbox.left > right || bbox.bottom < top || bbox.top > bottom) {
+                outside = true;
+            }
+        } else {
+            if (inst->x > right || left > inst->x || inst->y > bottom || top > inst->y) {
+                outside = true;
+            }
+        }
+
+        if (outside != wantInside) inst->active = true;
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_instance_deactivate_region(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (5 > argCount) return RValue_makeUndefined();
+    Runner* runner = ctx->runner;
+    DataWin* dataWin = ctx->dataWin;
+    GMLReal left = RValue_toReal(args[0]);
+    GMLReal top = RValue_toReal(args[1]);
+    GMLReal width = RValue_toReal(args[2]);
+    GMLReal height = RValue_toReal(args[3]);
+    bool wantInside = RValue_toBool(args[4]);
+    bool notme = argCount > 5 ? RValue_toBool(args[5]) : false;
+    Instance* self = ctx->currentInstance;
+
+    GMLReal right = left + width - 1;
+    GMLReal bottom = top + height - 1;
+
+    // We don't use SpatialGrid here because sprite-less instances are NOT included in the SpatialGrid
+    int instCount = arrlen(runner->instances);
+    repeat(instCount, i) {
+        Instance* inst = runner->instances[i];
+        if (!inst->active || inst->destroyed) continue;
+        if (notme && inst == self) continue;
+        bool outside = false;
+        Sprite* spr = Collision_getSprite(dataWin, inst);
+        if (spr != nullptr) {
+            InstanceBBox bbox = Collision_computeBBox(dataWin, inst);
+            if (bbox.right < left || bbox.left > right || bbox.bottom < top || bbox.top > bottom) outside = true;
+        } else {
+            if (inst->x > right || left > inst->x || inst->y > bottom || top > inst->y) outside = true;
+        }
+        if (outside != wantInside) inst->active = false;
+    }
+    return RValue_makeUndefined();
+}
+
 static RValue builtin_event_inherited(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     Runner* runner = ctx->runner;
     Instance* inst = ctx->currentInstance;
@@ -10518,6 +10589,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "instance_activate_all", builtin_instance_activate_all);
     VM_registerBuiltin(ctx, "instance_activate_object", builtin_instance_activate_object);
     VM_registerBuiltin(ctx, "instance_deactivate_object", builtin_instance_deactivate_object);
+    VM_registerBuiltin(ctx, "instance_activate_region", builtin_instance_activate_region);
+    VM_registerBuiltin(ctx, "instance_deactivate_region", builtin_instance_deactivate_region);
     VM_registerBuiltin(ctx, "instance_activate_layer", builtin_instance_activate_layer);
     VM_registerBuiltin(ctx, "instance_deactivate_layer", builtin_instance_deactivate_layer);
     VM_registerBuiltin(ctx, "action_kill_object", builtin_action_kill_object);
