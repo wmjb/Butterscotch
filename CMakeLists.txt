@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
+
+if(PLATFORM STREQUAL "ps3")
+set(CMAKE_TOOLCHAIN_FILE ${CMAKE_SOURCE_DIR}/cmake/ppu.cmake)
+endif()
+
 project(butterscotch C)
 
 set(CMAKE_C_STANDARD 99)
@@ -51,12 +56,16 @@ endif()
 #
 # If only a single bytecode version is enabled, the checks will be collapsed and removed by the compiler during build time, reducing code size and improving
 # performance on low end hardware!
-option(ENABLE_BC16 "Enable support for Bytecode Version 16" ON)
+option(ENABLE_BC14 "Enable support for Bytecode Version 13/14" ON)
+option(ENABLE_BC16 "Enable support for Bytecode Version 15/16" ON)
 option(ENABLE_BC17 "Enable support for Bytecode Version 17" ON)
 option(ENABLE_LEGACY_GL "Enable the legacy OpenGL renderer" ON)
 option(ENABLE_MODERN_GL "Enable the modern OpenGL renderer" ON)
-if(NOT ENABLE_BC16 AND NOT ENABLE_BC17)
+if(NOT ENABLE_BC14 AND NOT ENABLE_BC16 AND NOT ENABLE_BC17)
     message(FATAL_ERROR "You need to build Butterscotch with at least one bytecode version enabled!")
+endif()
+if(ENABLE_BC14)
+    add_compile_definitions(ENABLE_BC14)
 endif()
 if(ENABLE_BC16)
     add_compile_definitions(ENABLE_BC16)
@@ -122,6 +131,10 @@ target_include_directories(butterscotch PUBLIC vendor/stb/ds)
 # RFC 1321 reference MD5 implementation
 target_sources(butterscotch PRIVATE vendor/md5/md5.c)
 target_include_directories(butterscotch PUBLIC vendor/md5)
+
+# Base64 implementation
+target_sources(butterscotch PRIVATE vendor/base64/base64.c)
+target_include_directories(butterscotch PUBLIC vendor/base64)
 
 if(PLATFORM STREQUAL "glfw")
     if (NOT ENABLE_LEGACY_GL AND NOT ENABLE_MODERN_GL)
@@ -227,6 +240,72 @@ if(PLATFORM STREQUAL "glfw")
             ${CMAKE_SOURCE_DIR}/vendor/gamecontrollerdb.txt
             $<TARGET_FILE_DIR:butterscotch>/gamecontrollerdb.txt
     )
+elseif(PLATFORM STREQUAL "sdl")
+    if (NOT ENABLE_LEGACY_GL)
+        message(FATAL_ERROR "SDL requires legacy GL!")
+    endif()
+    file(GLOB GL_SOURCES src/gl_legacy/*.c src/gl_common/*.c src/image/*.c)
+    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl_legacy)
+    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl_common)
+    target_sources(butterscotch PRIVATE ${GL_SOURCES})
+    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/gl)
+    target_include_directories(butterscotch PRIVATE ${CMAKE_SOURCE_DIR}/src/image)
+
+    # Butterscotch VM/interpreter profiler
+    option(ENABLE_VM_GML_PROFILER "Enable Butterscotch VM/interpreter profiler" ON)
+    if(ENABLE_VM_GML_PROFILER)
+        add_compile_definitions(ENABLE_VM_GML_PROFILER)
+    endif()
+
+    # Butterscotch VM/interpreter tracing
+    option(ENABLE_VM_TRACING "Enable Butterscotch VM/interpreter tracing checks" ON)
+    if(ENABLE_VM_TRACING)
+        add_compile_definitions(ENABLE_VM_TRACING)
+    endif()
+
+    # Butterscotch VM opcode count profiler
+    option(ENABLE_VM_OPCODE_PROFILER "Enable Butterscotch VM opcode count profiler" ON)
+    if(ENABLE_VM_OPCODE_PROFILER)
+        add_compile_definitions(ENABLE_VM_OPCODE_PROFILER)
+    endif()
+
+    # Spatial grid logs
+    option(ENABLE_SPATIAL_GRID_LOGS "Enable Spatial Grid logs" OFF)
+    if(ENABLE_SPATIAL_GRID_LOGS)
+        add_compile_definitions(ENABLE_SPATIAL_GRID_LOGS)
+    endif()
+
+    # VM unknown/stubbed function logs
+    option(ENABLE_VM_STUB_LOGS "Enable VM unknown/stubbed function logs" ON)
+    if(ENABLE_VM_STUB_LOGS)
+        add_compile_definitions(ENABLE_VM_STUB_LOGS)
+    endif()
+
+    # GLAD
+    add_library(glad STATIC vendor/glad/src/glad.c)
+    target_include_directories(glad PUBLIC vendor/glad/include)
+
+    # stb_image
+    target_include_directories(butterscotch PUBLIC vendor/stb/image)
+
+    # stb_vorbis
+    target_include_directories(butterscotch PUBLIC vendor/stb/vorbis)
+
+    find_package(SDL REQUIRED)
+    target_include_directories(butterscotch PUBLIC "${SDL_INCLUDE_DIR}")
+    target_link_libraries(butterscotch ${AUDIO_LIBRARIES} ${SDL_LIBRARY} glad m pthread bz2)
+
+    # Enable AddressSanitizer by default in Debug builds
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(ENABLE_ASAN_DEFAULT ON)
+    else()
+        set(ENABLE_ASAN_DEFAULT OFF)
+    endif()
+    set(ENABLE_ASAN ${ENABLE_ASAN_DEFAULT} CACHE BOOL "Enable AddressSanitizer")
+    if(ENABLE_ASAN AND NOT MINGW AND NOT CMAKE_SYSTEM_NAME STREQUAL "Haiku")
+        target_compile_options(butterscotch PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(butterscotch PRIVATE -fsanitize=address)
+    endif()
 elseif(PLATFORM STREQUAL "web")
     if (NOT ENABLE_MODERN_GL)
         message(FATAL_ERROR "Web requires modern gl!")

@@ -30,7 +30,9 @@
 #define bm_inv_dest_color 10
 #define bm_src_alpha_sat 11
 
-// The "application_surface" sentinel ID
+// Sentinel returned by ensureApplicationSurface on platforms that don't back the application_surface with a real entry in the renderer's surface table.
+//
+// Also used as the initial value of Runner.applicationSurfaceId before the first ensure call.
 #define APPLICATION_SURFACE_ID (-1)
 
 // Nine-slice tile mode constants
@@ -43,12 +45,14 @@
 // ===[ Renderer Vtable ]===
 
 typedef struct Renderer Renderer;
+typedef struct Runner Runner;
 
 typedef struct {
     void (*init)(Renderer* renderer, DataWin* dataWin);
     void (*destroy)(Renderer* renderer);
     void (*beginFrame)(Renderer* renderer, int32_t gameW, int32_t gameH, int32_t windowW, int32_t windowH);
-    void (*endFrame)(Renderer* renderer);
+    void (*endFrameInit)(Renderer* renderer);
+    void (*endFrameEnd)(Renderer* renderer);
     void (*beginView)(Renderer* renderer, int32_t viewX, int32_t viewY, int32_t viewW, int32_t viewH, int32_t portX, int32_t portY, int32_t portW, int32_t portH, float viewAngle);
     void (*endView)(Renderer* renderer);
     // GUI pass: coordinates are (0,0)..(guiW,guiH) mapped to the current view's port rect. Called after endView.
@@ -85,8 +89,13 @@ typedef struct {
     // Surface Functions
     int32_t (*createSurface)(Renderer* renderer, int32_t width, int32_t height);
     bool (*surfaceExists)(Renderer* renderer, int32_t surfaceID);
-    // Bind the given surface as the active render target. Pass APPLICATION_SURFACE_ID to bind the main framebuffer.
+    // Bind the given surface as the active render target. Pass renderer->runner->applicationSurfaceId to bind the application surface.
     bool (*setRenderTarget)(Renderer* renderer, int32_t surfaceID);
+    // Lazy allocation hook called every frame by Runner_beginFrame.
+    // Creates the application_surface on the first frame (and after application_surface_enable(false) -> true cycles).
+    // Resizes in place if the requested dimensions changed.
+    // Returns the surface ID to use.
+    int32_t (*ensureApplicationSurface)(Renderer* renderer, int32_t width, int32_t height);
     float (*getSurfaceWidth)(Renderer* renderer, int32_t surfaceID);
     float (*getSurfaceHeight)(Renderer* renderer, int32_t surfaceID);
     void (*drawSurface)(Renderer* renderer, int32_t surfaceID, int32_t srcLeft, int32_t srcTop, int32_t srcWidth, int32_t srcHeight, float x, float y, float xscale, float yscale, float angleDeg, uint32_t color, float alpha);
@@ -116,6 +125,7 @@ struct Renderer {
     int32_t CPortY;
     int32_t CPortW;
     int32_t CPortH;
+    Runner* runner;
 };
 
 // ===[ Shared Helpers (platform-agnostic) ]===

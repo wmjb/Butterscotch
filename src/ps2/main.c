@@ -437,6 +437,9 @@ int main(int argc, char* argv[]) {
     shfree(eagerRooms);
 
     bool bytecodeVersionSupported = false;
+#ifdef ENABLE_BC14
+    if (dataWin->gen8.bytecodeVersion == 13 || dataWin->gen8.bytecodeVersion == 14) bytecodeVersionSupported = true;
+#endif
 #ifdef ENABLE_BC16
     if (dataWin->gen8.bytecodeVersion == 15 || dataWin->gen8.bytecodeVersion == 16) bytecodeVersionSupported = true;
 #endif
@@ -636,25 +639,28 @@ int main(int argc, char* argv[]) {
 
         gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
 
-        renderer->vtable->beginFrame(renderer, gameW, gameH, 640, 448);
+        Runner_drawPre(runner, 640, 448);
+        Runner_beginFrame(runner, gameW, gameH, 640, 448);
 
         // Clear with room background color
         if (runner->drawBackgroundColor) {
             uint8_t bgR = BGR_R(runner->backgroundColor);
             uint8_t bgG = BGR_G(runner->backgroundColor);
             uint8_t bgB = BGR_B(runner->backgroundColor);
-            u64 bgColor = GS_SETREG_RGBAQ(bgR, bgG, bgB, 0x80, 0x00);
+            uint8_t bgA = BGR_A(runner->backgroundColor);
+            u64 bgColor = GS_SETREG_RGBAQ(bgR, bgG, bgB, bgA, 0x00);
             gsKit_prim_sprite(gsGlobal, 0, 0, 640, 448, 0, bgColor);
         }
 
         // Render views
         u64 drawStartTime = GetTimerSystemTime();
         Runner_drawViews(runner, gameW, gameH, 1.0f, 1.0f, false);
-        u64 drawEndTime = GetTimerSystemTime();
-
         runner->viewCurrent = 0;
-
-        renderer->vtable->endFrame(renderer);
+        renderer->vtable->endFrameInit(renderer);
+        Runner_drawPost(runner, 640, 448);
+        renderer->vtable->endFrameEnd(renderer);
+        Runner_drawGUI(runner, 640, 448, gameW, gameH);
+        u64 drawEndTime = GetTimerSystemTime();
 
         // Clear pressed/released edges after both Step and Draw have consumed input
         // This MUST be after Runner_draw because games CAN handle input in Draw events (e.g. Undertale's naming screen)

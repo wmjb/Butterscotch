@@ -221,12 +221,17 @@ struct VMContext {
     struct { char* key; int32_t value; }* codeIndexByName;
     // codeName -> CodeLocals* hash map (stb_ds)
     struct { char* key; CodeLocals* value; }* codeLocalsMap;
-    // BC17+: A map of CODE indexes -> localVars slot lookup map
+    // BC13/BC14/BC17+: A map of CODE indexes -> localVars slot lookup map
     IntIntHashMap* codeLocalsSlotMaps;
+    // BC13/BC14 only: varIdx -> globalVars slot lookup
+    IntIntHashMap globalVarsSlotMap;
+    // Allocated capacity of ctx->globalVars, only used for BC13/BC14
+    uint32_t globalVarCapacity;
     // varName -> varID hash map for global variables (stb_ds)
     struct { char* key; int32_t value; }* globalVarNameMap;
     // varName -> varID hash map for self/instance-scoped variables (stb_ds).
     struct { char* key; int32_t value; }* selfVarNameMap;
+    int32_t nextDynamicSelfVarID;
     // "codeName\tfuncName" -> true, for deduplicating unknown function warnings
     StringBooleanEntry* loggedUnknownFuncs;
     // "codeName\tfuncName" -> true, for deduplicating stubbed function warnings
@@ -285,6 +290,14 @@ void VM_registerBuiltin(VMContext* ctx, const char* name, BuiltinFunc func);
 BuiltinFunc VM_findBuiltin(VMContext* ctx, const char* name);
 RValue VM_createArray(VMContext* ctx);
 void VM_arraySet(VMContext* ctx, RValue* arrayRef, int32_t index, RValue val);
+
+// Set a named field on a freshly-built GML struct, handles built-in vars and self-vars.
+// Unknown variables are not written to the struct.
+// Takes ownership of "val" and frees it after copying into the struct.
+void VM_structSet(VMContext* ctx, Instance* structInst, const char* name, RValue val);
+
+// Look up the varID for a self-scoped variable name, allocating a fresh synthetic ID if absent.
+int32_t VM_getOrAllocateSelfVarID(VMContext* ctx, const char* name);
 
 static const char* VM_getCallerName(VMContext* ctx) {
     return ctx->currentCodeName != nullptr ? ctx->currentCodeName : "<unknown>";
