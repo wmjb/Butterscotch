@@ -257,6 +257,13 @@ static void d3d9_emitTexturedQuad(
         d3d9_flushBatch(dr);
     }
 
+if (!tex) {
+    fprintf(stderr, "D3D9: emitTexturedQuad called with NULL tex\n");
+    return;
+}
+
+
+
     dr->currentTexture = tex;
 
     float* verts = dr->vertexData + dr->quadCount * VERTICES_PER_QUAD * FLOATS_PER_VERTEX;
@@ -1062,47 +1069,79 @@ static bool d3d9_resolveGlyph(
     float* outU0, float* outV0, float* outU1, float* outV1,
     float* outLocalX0, float* outLocalY0
 ) {
+    if (!dr || !dw || !state || !glyph || !outTex ||
+        !outU0 || !outV0 || !outU1 || !outV1 ||
+        !outLocalX0 || !outLocalY0) {
+        return false;
+    }
+
+    *outTex = NULL;
+
     Font* font = state->font;
+    if (!font) return false;
+
     if (font->isSpriteFont && state->spriteFontSprite != NULL) {
         Sprite* sprite = state->spriteFontSprite;
+        if (!sprite || !sprite->tpagIndices || sprite->textureCount == 0)
+            return false;
+
         int32_t glyphIndex = (int32_t)(glyph - font->glyphs);
-        if (glyphIndex < 0 || glyphIndex >= (int32_t)sprite->textureCount) return false;
+        if (glyphIndex < 0 || glyphIndex >= (int32_t)sprite->textureCount)
+            return false;
 
         int32_t tpagIdx = sprite->tpagIndices[glyphIndex];
-        if (tpagIdx < 0) return false;
+        if (tpagIdx < 0 || (uint32_t)tpagIdx >= dw->tpag.count)
+            return false;
 
         TexturePageItem* glyphTpag = &dw->tpag.items[tpagIdx];
         int16_t pid = glyphTpag->texturePageId;
-        if (pid < 0 || (uint32_t)pid >= dr->textureCount) return false;
-        if (!d3d9_ensureTextureLoaded(dr, (uint32_t)pid)) return false;
+        if (pid < 0 || (uint32_t)pid >= dr->textureCount)
+            return false;
+        if (!d3d9_ensureTextureLoaded(dr, (uint32_t)pid))
+            return false;
 
-        *outTex = dr->d3dTextures[pid];
+        IDirect3DTexture9* tex = dr->d3dTextures[pid];
         int32_t tw = dr->textureWidths[pid];
         int32_t th = dr->textureHeights[pid];
+        if (!tex || tw <= 0 || th <= 0)
+            return false;
+
+        *outTex = tex;
 
         *outU0 = (float)glyphTpag->sourceX / (float)tw;
         *outV0 = (float)glyphTpag->sourceY / (float)th;
-        *outU1 = (float)(glyphTpag->sourceX + glyphTpag->sourceWidth) / (float)tw;
+        *outU1 = (float)(glyphTpag->sourceX + glyphTpag->sourceWidth)  / (float)tw;
         *outV1 = (float)(glyphTpag->sourceY + glyphTpag->sourceHeight) / (float)th;
 
         *outLocalX0 = cursorX + (float)glyph->offset;
         *outLocalY0 = cursorY + (float)((int32_t)glyphTpag->targetY - sprite->originY);
     } else {
+        if (!state->fontTpag || !state->tex || state->texW <= 0 || state->texH <= 0)
+            return false;
+
         *outTex = state->tex;
+
         *outU0 = (float)(state->fontTpag->sourceX + glyph->sourceX) / (float)state->texW;
         *outV0 = (float)(state->fontTpag->sourceY + glyph->sourceY) / (float)state->texH;
-        *outU1 = (float)(state->fontTpag->sourceX + glyph->sourceX + glyph->sourceWidth) / (float)state->texW;
+        *outU1 = (float)(state->fontTpag->sourceX + glyph->sourceX + glyph->sourceWidth)  / (float)state->texW;
         *outV1 = (float)(state->fontTpag->sourceY + glyph->sourceY + glyph->sourceHeight) / (float)state->texH;
 
         *outLocalX0 = cursorX + glyph->offset;
         *outLocalY0 = cursorY;
     }
+
+    if (!*outTex)
+        return false;
+
     return true;
 }
 
 static void d3d9_drawText(Renderer* renderer, const char* text,
                           float x, float y, float y1cale, float x2cale, float y3) {
+
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
+
+
     DataWin* dw = renderer->dataWin;
 
     int32_t fontIndex = renderer->drawFont;
@@ -1220,6 +1259,9 @@ static void d3d9_drawText(Renderer* renderer, const char* text,
 static void d3d9_drawTextColor(Renderer* renderer, const char* text,
                                float x, float y, float y1cale, float x2cale, float y3,
                                int32_t _c1, int32_t _c2, int32_t _c3, int32_t _c4, float alpha) {
+
+
+
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     DataWin* dw = renderer->dataWin;
 
@@ -1420,9 +1462,10 @@ static int32_t d3d9_findSurfaceStackTop(D3D9Renderer* dr) {
 static bool d3d9_setRenderTargetInternal(Renderer* renderer, int32_t surfaceId) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
 
+/*
 fprintf(stderr, "D3D9: setRTInternal id=%d rtSurf=%p ssCount=%u\n",
         surfaceId, (void*)dr->rtSurface, dr->ssurfaceCount);
-
+*/
 
     d3d9_flushBatch(dr);
 
@@ -1495,6 +1538,8 @@ fprintf(stderr, "D3D9: setRTInternal id=%d rtSurf=%p ssCount=%u\n",
 static bool d3d9_setRenderTarget(Renderer* renderer, int32_t surfaceID) {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
 
+
+//fprintf(stderr, "D3D9: setRenderTarget(%d)\n", surfaceID);
     d3d9_flushBatch(dr);
     int32_t slot = d3d9_findSurfaceStackSlot(dr);
     if (slot == -1) return false;
@@ -1527,7 +1572,7 @@ static bool d3d9_resetSurfaceTarget(Renderer* renderer) {
 
 static int32_t d3d9_createSurface(Renderer* renderer, int32_t width, int32_t height) {
 
-    fprintf(stderr, "D3D9: createSurface STUB %dx%d\n", width, height);
+    //fprintf(stderr, "D3D9: createSurface STUB %dx%d\n", width, height);
 
 
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
@@ -1594,13 +1639,13 @@ static void d3d9_surfaceResize(Renderer* renderer, int32_t surfaceId, int32_t wi
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
     d3d9_flushBatch(dr);
 
-
+/*
 fprintf(stderr, "D3D9: surfaceResize id=%d old=%dx%d new=%dx%d\n",
         surfaceId,
         dr->surfaceWidth[surfaceId], dr->surfaceHeight[surfaceId],
         width, height);
 
-
+*/
 if (width <= 0 || height <= 0) {
     fprintf(stderr, "D3D9: surfaceResize to non‑positive size, ignoring (id=%d)\n", surfaceId);
     return;
@@ -1848,6 +1893,10 @@ void d3d9_drawSurface(
 )
 {
     D3D9Renderer* dr = (D3D9Renderer*)renderer;
+
+
+//fprintf(stderr, "D3D9: drawSurface(%d)\n", surfaceID);
+
 
     if ((uint32_t)surfaceID >= dr->ssurfaceCount)
         return;
