@@ -1093,72 +1093,50 @@ int main(int argc, char* argv[]) {
         // Query actual framebuffer size
         RECT clientRect;
         GetClientRect(g_window, &clientRect);
-        int fbWidth = clientRect.right - clientRect.left;
+        int fbWidth  = clientRect.right  - clientRect.left;
         int fbHeight = clientRect.bottom - clientRect.top;
-        if (fbWidth <= 0) fbWidth = (int)gen8->defaultWindowWidth;
+        if (fbWidth  <= 0) fbWidth  = (int)gen8->defaultWindowWidth;
         if (fbHeight <= 0) fbHeight = (int)gen8->defaultWindowHeight;
 
-        int32_t gameW = (int32_t) gen8->defaultWindowWidth;
-        int32_t gameH = (int32_t) gen8->defaultWindowHeight;
+        int32_t gameW = (int32_t)gen8->defaultWindowWidth;
+        int32_t gameH = (int32_t)gen8->defaultWindowHeight;
 
         float displayScaleX;
         float displayScaleY;
 
+        // New: match GL flow
+        Runner_drawPre(runner, fbWidth, fbHeight);
         Runner_computeViewDisplayScale(runner, gameW, gameH, &displayScaleX, &displayScaleY);
 
-        // Clear backbuffer with room background color
-        DWORD clearColor;
-        if (runner->drawBackgroundColor) {
-            int rInt = BGR_R(runner->backgroundColor);
-            int gInt = BGR_G(runner->backgroundColor);
-            int bInt = BGR_B(runner->backgroundColor);
-            clearColor = D3DCOLOR_XRGB(rInt, gInt, bInt);
-        } else {
-            clearColor = D3DCOLOR_XRGB(0, 0, 0);
-        }
-
-        IDirect3DDevice9_Clear(d3dDevice, 0, NULL, D3DCLEAR_TARGET, clearColor, 1.0f, 0);
-
+        // Begin frame on renderer (sets up RT, viewport, etc.)
         renderer->vtable->beginFrame(renderer, gameW, gameH, fbWidth, fbHeight);
 
+        // Clear with room background color via renderer (instead of raw D3D Clear)
+        if (runner->drawBackgroundColor) {
+            uint32_t bg = runner->backgroundColor; // already BGR-packed
+            float a = (float)BGR_A(bg) / 255.0f;
+            renderer->vtable->clearScreen(renderer, bg, a);
+        } else {
+            renderer->vtable->clearScreen(renderer, 0x00000000u, 1.0f);
+        }
+
+        // Draw views into the game RT
         Runner_drawViews(runner, gameW, gameH, displayScaleX, displayScaleY, debugShowCollisionMasks);
 
-        renderer->vtable->endFrame(renderer);
+        // New split: init/end instead of single endFrame
+        renderer->vtable->endFrameInit(renderer);
+        Runner_drawPost(runner, fbWidth, fbHeight);
+        renderer->vtable->endFrameEnd(renderer);
 
-renderer->vtable->beginGUI(renderer,
-                           fbWidth, fbHeight,
-                           0, 0,
-                           fbWidth, fbHeight);
-Runner_drawGUI(runner);
+        // GUI: now matches GL signature
+        renderer->vtable->beginGUI(renderer,
+                                   fbWidth, fbHeight,
+                                   0, 0,
+                                   fbWidth, fbHeight);
+        Runner_drawGUI(runner, fbWidth, fbHeight, gameW, gameH);
+        renderer->vtable->endGUI(renderer);
 
-renderer->vtable->endGUI(renderer);
-
-IDirect3DDevice9_EndScene(d3dDevice);
-
-
-        // Capture screenshot if this frame matches a requested frame (stubbed)
-        bool shouldScreenshot = hmget(args.screenshotFrames, runner->frameCount);
-        if (shouldScreenshot && !screenshotWarned) {
-            fprintf(stderr, "Warning: --screenshot/--screenshot-at-frame not implemented for D3D9 build\n");
-            screenshotWarned = true;
-        }
-
-        // Dump all surfaces if this frame matches a requested frame (stubbed)
-        bool shouldDumpSurfaces = hmget(args.screenshotSurfacesFrames, runner->frameCount);
-        if (shouldDumpSurfaces && !screenshotSurfacesWarned) {
-            fprintf(stderr, "Warning: --screenshot-surfaces/--screenshot-surfaces-at-frame not implemented for D3D9 build\n");
-            screenshotSurfacesWarned = true;
-        }
-
-        if (args.exitAtFrame >= 0 && runner->frameCount >= args.exitAtFrame) {
-            printf("Exiting at frame %d (--exit-at-frame)\n", runner->frameCount);
-            g_windowShouldClose = true;
-        }
-
-        if (shouldStep && args.traceFrames) {
-            double frameElapsedMs = (nowTimeSeconds() - frameStartTime) * 1000.0;
-            fprintf(stderr, "Frame %d (End, %.2f ms)\n", runner->frameCount, frameElapsedMs);
-        }
+        // No manual EndScene here; renderer handles its own scene boundaries now
 
         // Only present when there isn't a room change to match the original runner.
         if (runner->pendingRoom == -1) {
@@ -1183,7 +1161,7 @@ IDirect3DDevice9_EndScene(d3dDevice);
         double fps = fpsFrames / fpsAccum;
 
         wchar_t title[256];
-        swprintf(title, 256, L"Butterscotch - %S  |  FPS: %.1f",
+        swprintf(title, 256, L"Butterscotch [d3d9] - %S  |  FPS: %.1f",
                  gen8->displayName, fps);
 
         SetWindowTextW(g_window, title);
